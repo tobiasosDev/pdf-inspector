@@ -348,6 +348,14 @@ const TRACKING_NEEDS_CAPITALS_MAX: f32 = 140.0;
 /// a wide space.
 const TRACKING_MAX_ABSOLUTE: f32 = 450.0;
 
+/// Capitals a run must show for tracking past [`TRACKING_MAX`] thresholds
+/// (up to [`TRACKING_MAX_ABSOLUTE`]) to read as tracking: a running head
+/// or title in spaced capitals ("C E N T E R" at 0.39 em, its words 1.1 em
+/// apart) next to a font with a narrow space. Only capitals and title
+/// punctuation qualify there, never digits: a row of single digits that
+/// far apart is a row of numbers.
+const TRACKING_WIDE_MIN_CAPITALS: usize = 3;
+
 /// A `TJ` offset of this many word-gap thresholds or more ends the sub-run
 /// instead of adding a space: column positioning, not a word gap.
 const COLUMN_GAP_THRESHOLDS: f32 = 4.0;
@@ -464,7 +472,8 @@ fn lower_median(sorted: &[f32]) -> f32 {
 /// judge one at a time), a junction the offset closes up (a kern, which
 /// formulas and kerned words carry and tracking never does), or a typical
 /// gap under [`TRACKING_MIN`] (kerning) or over [`TRACKING_MAX`] (word and
-/// column spacing) thresholds. `decode` decodes one string element, and
+/// column spacing) thresholds, unless the run is spaced capitals (see
+/// [`TRACKING_WIDE_MIN_CAPITALS`]). `decode` decodes one string element, and
 /// the glyphs of every run in that band are decoded — one call per string
 /// of an array already found to be such a run; an element it cannot
 /// decode — a code the font does not map, a CMap choice still being
@@ -588,7 +597,7 @@ pub(crate) fn tj_tracking(
         .collect();
     let tracking = lower_median(&letter_gaps);
     let tracking_max = (space_threshold * TRACKING_MAX).min(TRACKING_MAX_ABSOLUTE);
-    if tracking < space_threshold * TRACKING_MIN || tracking > tracking_max {
+    if tracking < space_threshold * TRACKING_MIN || tracking > TRACKING_MAX_ABSOLUTE {
         return None;
     }
     // Tracked display text is letters, digits or Han/Kana with the odd
@@ -611,6 +620,16 @@ pub(crate) fn tj_tracking(
     }
     if letters < punctuation {
         return None;
+    }
+    if tracking > tracking_max {
+        let mut capitals = 0usize;
+        let spaced_capitals = texts.iter().flat_map(|text| text.chars()).all(|c| {
+            capitals += usize::from(c.is_uppercase());
+            c.is_uppercase() || c.is_whitespace() || is_title_punctuation(c)
+        });
+        if !spaced_capitals || capitals < TRACKING_WIDE_MIN_CAPITALS {
+            return None;
+        }
     }
     let needs_capitals =
         (space_threshold * TRACKING_NEEDS_CAPITALS).min(TRACKING_NEEDS_CAPITALS_MAX);
@@ -1168,6 +1187,36 @@ mod tests {
             read("(V) -125 (a) -135 (l) -120 (l) -125 (e) -130 (y)"),
             Some(125.0)
         );
+    }
+
+    /// A running head in spaced capitals next to a font with a narrow space:
+    /// 0.39 em between letters is more than three thresholds, and still the
+    /// tracking of the head, whose words stand 1.1 em apart. Digits, lower
+    /// case and tracking past the absolute cap keep the fixed thresholds.
+    #[test]
+    fn spaced_capitals_read_heavy_tracking_beside_a_narrow_space() {
+        let mut narrow = font();
+        narrow.space_width = 250;
+        let threshold = word_gap_threshold(Some(&narrow));
+        assert_eq!(threshold, 100.0);
+        let read = |spec: &str| tj_tracking(&tj(spec), Some(&narrow), threshold, latin);
+        assert_eq!(
+            read("(C) -389 (E) -389 (N) -389 (T) -389 (E) -389 (R)"),
+            Some(389.0)
+        );
+        assert_eq!(
+            read(
+                "(Z) -389 (E) -389 (L) -389 (L) -369 (/) -314 (L) -389 (U) -389 (R) -389 (I) \
+                 -389 (E) -1084 (R) -389 (E) -389 (A) -389 (L)"
+            ),
+            Some(389.0)
+        );
+        assert_eq!(read("(1) -389 (2) -389 (3) -389 (4) -389 (5)"), None);
+        assert_eq!(read("(C) -389 (e) -389 (n) -389 (t)"), None);
+        assert_eq!(read("(U) -389 (S)"), None);
+        assert_eq!(read("(C) -460 (E) -460 (N) -460 (T)"), None);
+        // Within three thresholds nothing changes.
+        assert_eq!(read("(U) -300 (S) -300 (A)"), Some(300.0));
     }
 
     #[test]

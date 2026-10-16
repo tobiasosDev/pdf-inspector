@@ -504,6 +504,111 @@ fn base14_fallback_widths(
     })
 }
 
+/// Least run of consecutive codes that carry code 32's width for that width
+/// to be a placeholder: a producer that fills the codes a subset leaves
+/// unused writes one width for all of them, 23 codes or more in 545 sampled
+/// papers (JAMA's GuardianSansGR: 497 for codes 5–36). Real glyphs of a
+/// proportional font share a width in shorter runs: the tabular digits of
+/// a subset in its own order (Arial: 5), TeX's arrows and delimiters in
+/// pairs, 16 same-width relations of a math font.
+const PLACEHOLDER_RUN: usize = 20;
+
+/// Least placeholder width, in thousandths of an em, that is taken for no
+/// space: wider than any proportional space. A narrower one is as good a
+/// yardstick as the estimate that would replace it.
+const PLACEHOLDER_MIN_WIDTH: u16 = 450;
+
+/// The space width of a simple font of the 1000-unit glyph space whose
+/// code 32 has the advance `width_32`: that advance while code 32 is the
+/// space, else the advance of the font's space glyph, 0 for none (the
+/// caller estimates one). A font whose word gaps are pen travel rather than
+/// space glyphs has its gaps judged against 0.4 of this width, so a code 32
+/// that is no space lifts the threshold above every real gap and each line
+/// reads as one word. Two producer habits make it no space:
+///
+/// - a subset in the producer's own glyph order, which moves letters off
+///   their ASCII codes and re-encodes 32 for a glyph of the text
+///   (`/Differences [1 /T … 32 /K …]`, Elsevier's AdvTimes): the space is
+///   the lowest code whose glyph reads as one;
+/// - a width table that fills the codes the subset leaves unused with one
+///   placeholder width wider than any space (see [`PLACEHOLDER_RUN`]), in a
+///   proportional font.
+///
+/// TeX's math fonts keep their own glyph at 32 (ψ, ←) in TeX's order, with
+/// its own width: the offsets between their glyphs are math spacing and
+/// kerns, which that width keeps from reading as word gaps, and neither
+/// habit matches them.
+fn code_32_space_width(
+    doc: &Document,
+    font_dict: &lopdf::Dictionary,
+    widths: &HashMap<u16, u16>,
+    width_32: u16,
+) -> u16 {
+    if let Some(encoding) = parse_font_encoding(doc, font_dict) {
+        let reads_as_text = encoding.map.get(&32).is_some_and(|c| !c.is_whitespace());
+        let subset_order = encoding.glyph_names.iter().any(|(&code, name)| {
+            matches!(name.as_bytes(), [letter] if letter.is_ascii_alphabetic() && *letter != code)
+        });
+        if reads_as_text && subset_order {
+            return encoding
+                .map
+                .iter()
+                .filter(|(_, c)| **c == ' ')
+                .map(|(code, _)| u16::from(*code))
+                .min()
+                .and_then(|code| widths.get(&code).copied())
+                .unwrap_or(0);
+        }
+    }
+    let run = |step: i32| {
+        (1..)
+            .map(|k| 32 + step * k)
+            .take_while(|code| {
+                u16::try_from(*code).is_ok_and(|code| widths.get(&code) == Some(&width_32))
+            })
+            .count()
+    };
+    let placeholder = 1 + run(-1) + run(1) >= PLACEHOLDER_RUN;
+    if placeholder
+        && width_32 > PLACEHOLDER_MIN_WIDTH
+        && !simple_font_fixed_pitch(doc, font_dict, widths)
+    {
+        return 0;
+    }
+    width_32
+}
+
+/// Whether a simple font is monospaced, whose space is as wide as its other
+/// glyphs: its descriptor's FixedPitch flag (bit 1) says so, or a dozen
+/// codes or more carry one advance (see
+/// [`FontWidthInfo::fixed_pitch_by_advance`]).
+fn simple_font_fixed_pitch(
+    doc: &Document,
+    font_dict: &lopdf::Dictionary,
+    widths: &HashMap<u16, u16>,
+) -> bool {
+    let flag = font_dict
+        .get(b"FontDescriptor")
+        .ok()
+        .and_then(|obj| resolve_dict(doc, obj))
+        .and_then(|descriptor| descriptor.get(b"Flags").ok())
+        .and_then(|obj| match obj {
+            Object::Reference(id) => doc.get_object(*id).ok().and_then(|o| o.as_i64().ok()),
+            direct => direct.as_i64().ok(),
+        })
+        .is_some_and(|flags| flags & 1 != 0);
+    flag || FontWidthInfo {
+        widths: widths.clone(),
+        default_width: 0,
+        space_width: 0,
+        is_cid: false,
+        units_scale: 0.001,
+        wmode: 0,
+    }
+    .fixed_pitch_by_advance()
+        == Some(true)
+}
+
 /// Parse widths for simple fonts (Type1, TrueType, MMType1, Type3)
 /// Reads FirstChar, LastChar, and Widths array.
 /// For Type3 fonts, reads FontMatrix to determine the correct units_scale.
@@ -587,36 +692,11 @@ pub(crate) fn parse_simple_font_widths(
         0.001 // Standard 1000-unit system
     };
 
-    // Code 32 is the space only when the encoding leaves it the space: a
-    // `Differences` entry may name another glyph there (`32 /K`), and then
-    // the font's space, if any, sits at the code named `space`. A width no
-    // proportional space has (half an em) is a placeholder written for an
-    // unused code of a subset without a space glyph. Either one set as the
-    // word-gap yardstick lifts the threshold above the real word gaps, and
-    // every line merges into one word.
-    if space_width != 0 {
-        if let Some(encoding) = parse_font_encoding(doc, font_dict) {
-            if encoding
-                .glyph_names
-                .get(&32)
-                .is_some_and(|name| name != "space")
-            {
-                space_width = encoding
-                    .glyph_names
-                    .iter()
-                    .find(|(_, name)| name.as_str() == "space")
-                    .and_then(|(code, _)| widths.get(&u16::from(*code)).copied())
-                    .unwrap_or(0);
-            }
-        }
-        let advances: Vec<u16> = widths.values().copied().filter(|&w| w != 0).collect();
-        let fixed_pitch = advances.len() >= 12
-            && advances.iter().max().zip(advances.iter().min()).is_some_and(|(high, low)| {
-                f32::from(high - low) <= (f32::from(*high) * 0.002).max(1.0)
-            });
-        if !fixed_pitch && space_width as f32 * units_scale > 0.45 {
-            space_width = 0;
-        }
+    // The width of code 32 is the word-gap yardstick only while code 32 is
+    // the space (see `code_32_space_width`). A font of the 1000-unit glyph
+    // space only: a Type3 font's widths are in its own units.
+    if space_width != 0 && (units_scale - 0.001).abs() <= 0.0005 {
+        space_width = code_32_space_width(doc, font_dict, &widths, space_width);
     }
 
     // If space width wasn't found in the table, estimate from font metrics.
@@ -7173,3 +7253,7 @@ mod stale_cmap_tests;
 #[cfg(test)]
 #[path = "blank_glyph_tests.rs"]
 pub(crate) mod blank_glyph_tests;
+
+#[cfg(test)]
+#[path = "space_width_tests.rs"]
+mod space_width_tests;
