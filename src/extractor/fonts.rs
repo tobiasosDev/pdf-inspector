@@ -587,6 +587,38 @@ pub(crate) fn parse_simple_font_widths(
         0.001 // Standard 1000-unit system
     };
 
+    // Code 32 is the space only when the encoding leaves it the space: a
+    // `Differences` entry may name another glyph there (`32 /K`), and then
+    // the font's space, if any, sits at the code named `space`. A width no
+    // proportional space has (half an em) is a placeholder written for an
+    // unused code of a subset without a space glyph. Either one set as the
+    // word-gap yardstick lifts the threshold above the real word gaps, and
+    // every line merges into one word.
+    if space_width != 0 {
+        if let Some(encoding) = parse_font_encoding(doc, font_dict) {
+            if encoding
+                .glyph_names
+                .get(&32)
+                .is_some_and(|name| name != "space")
+            {
+                space_width = encoding
+                    .glyph_names
+                    .iter()
+                    .find(|(_, name)| name.as_str() == "space")
+                    .and_then(|(code, _)| widths.get(&u16::from(*code)).copied())
+                    .unwrap_or(0);
+            }
+        }
+        let advances: Vec<u16> = widths.values().copied().filter(|&w| w != 0).collect();
+        let fixed_pitch = advances.len() >= 12
+            && advances.iter().max().zip(advances.iter().min()).is_some_and(|(high, low)| {
+                f32::from(high - low) <= (f32::from(*high) * 0.002).max(1.0)
+            });
+        if !fixed_pitch && space_width as f32 * units_scale > 0.45 {
+            space_width = 0;
+        }
+    }
+
     // If space width wasn't found in the table, estimate from font metrics.
     // The default of 250 is calibrated for standard 1000-unit fonts (units_scale=0.001).
     // For Type3 fonts with different coordinate systems, use average glyph width instead.
