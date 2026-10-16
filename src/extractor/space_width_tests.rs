@@ -179,20 +179,46 @@ fn a_short_run_of_equal_widths_is_glyphs() {
 fn a_monospaced_font_keeps_its_wide_space() {
     let (doc, f) = font(|_| 600, vec![]);
     assert_eq!(space_width(&doc, &f), 600);
-    // Fewer than a dozen glyphs carry an advance, but the descriptor's
-    // FixedPitch flag says the face is monospaced.
+    // The advances alone do not say monospaced (one glyph differs), but
+    // the descriptor's FixedPitch flag does; without the flag the run of
+    // 600s is a placeholder.
+    let widths = |code| match code {
+        10..=40 => 600,
+        65 => 500,
+        _ => 0,
+    };
     let mut doc = Document::with_version("1.4");
     let descriptor = doc.add_object(dictionary! {
         "Type" => "FontDescriptor",
         "FontName" => "ABCDEF+Probe",
         "Flags" => 1 | 32,
     });
-    let (_, mut f) = font(
-        |code| if (10..=40).contains(&code) { 600 } else { 0 },
-        vec![],
-    );
+    let (_, mut f) = font(widths, vec![]);
     f.set("FontDescriptor", descriptor);
     assert_eq!(space_width(&doc, &f), 600);
+    let (doc, f) = font(widths, vec![]);
+    assert_eq!(space_width(&doc, &f), 250);
+}
+
+#[test]
+fn a_replaced_code_32_width_is_kept_for_column_gaps() {
+    let jama = |code| {
+        if (5..=36).contains(&code) {
+            497
+        } else {
+            proportional(code)
+        }
+    };
+    let (doc, f) = font(jama, vec![]);
+    let info = parse_simple_font_widths(&doc, &f).expect("width table");
+    assert_eq!((info.space_width, info.code_32_width), (250, Some(497)));
+    // A code 32 that stays the space reports nothing extra.
+    let (doc, f) = font(
+        |code| if code == 32 { 651 } else { proportional(code) },
+        vec![],
+    );
+    let info = parse_simple_font_widths(&doc, &f).expect("width table");
+    assert_eq!((info.space_width, info.code_32_width), (651, None));
 }
 
 #[test]

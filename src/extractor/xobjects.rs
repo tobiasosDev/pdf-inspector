@@ -19,8 +19,9 @@ use super::geometry::{
     scaled_run_geometry,
 };
 use super::word_gaps::{
-    is_dependent_sign, offset_takes_spacing_back, tj_gap_thresholds, tj_tracking,
-    word_gap_candidate, word_gap_threshold, PenHighWater, PendingWordGaps, WordGapCandidate,
+    column_gap_threshold, is_dependent_sign, offset_takes_spacing_back, tj_gap_thresholds,
+    tj_tracking, word_gap_candidate, word_gap_threshold, PenHighWater, PendingWordGaps,
+    WordGapCandidate,
 };
 use super::{get_number, image_bbox_from_ctm, multiply_matrices};
 
@@ -1061,8 +1062,12 @@ fn extract_form_xobject_text_inner(
                             let combined = multiply_matrices(&text_matrix, &ctm);
                             combined[0].abs() >= combined[1].abs()
                         };
-                        let (word_gap, split_gap) =
-                            tj_gap_thresholds(space_threshold, tracking, baseline_horizontal);
+                        let (word_gap, split_gap) = tj_gap_thresholds(
+                            space_threshold,
+                            column_gap_threshold(font_info),
+                            tracking,
+                            baseline_horizontal,
+                        );
 
                         let mut sub_items: Vec<(String, f32, f32, f32, bool)> = Vec::new();
                         let mut current_text = String::new();

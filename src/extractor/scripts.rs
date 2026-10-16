@@ -165,7 +165,7 @@ fn is_script_marker_symbol(c: char) -> bool {
 /// Whether an item's text has the shape of a script glyph run: short, no
 /// whitespace, letters/digits/marker symbols only. Bullets, arrows, box
 /// glyphs and words are excluded here regardless of geometry.
-fn is_script_glyph_text(text: &str) -> bool {
+pub(super) fn is_script_glyph_text(text: &str) -> bool {
     if text.trim().len() != text.len() {
         // Edge whitespace means a word boundary was typeset around it.
         return false;

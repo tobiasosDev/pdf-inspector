@@ -501,6 +501,7 @@ fn base14_fallback_widths(
         is_cid: false,
         units_scale: 0.001,
         wmode: 0,
+        code_32_width: None,
     })
 }
 
@@ -604,6 +605,7 @@ fn simple_font_fixed_pitch(
         is_cid: false,
         units_scale: 0.001,
         wmode: 0,
+        code_32_width: None,
     }
     .fixed_pitch_by_advance()
         == Some(true)
@@ -695,9 +697,12 @@ pub(crate) fn parse_simple_font_widths(
     // The width of code 32 is the word-gap yardstick only while code 32 is
     // the space (see `code_32_space_width`). A font of the 1000-unit glyph
     // space only: a Type3 font's widths are in its own units.
+    let table_space_width = space_width;
     if space_width != 0 && (units_scale - 0.001).abs() <= 0.0005 {
         space_width = code_32_space_width(doc, font_dict, &widths, space_width);
     }
+    let code_32_width =
+        (table_space_width != 0 && space_width != table_space_width).then_some(table_space_width);
 
     // If space width wasn't found in the table, estimate from font metrics.
     // The default of 250 is calibrated for standard 1000-unit fonts (units_scale=0.001).
@@ -720,6 +725,7 @@ pub(crate) fn parse_simple_font_widths(
         is_cid: false,
         units_scale,
         wmode: 0,
+        code_32_width,
     })
 }
 
@@ -786,6 +792,7 @@ pub(crate) fn parse_type0_widths(
         is_cid: true,
         units_scale: 0.001, // CID fonts use standard 1000-unit system
         wmode,
+        code_32_width: None,
     })
 }
 
@@ -3680,6 +3687,7 @@ mod tests {
                 is_cid: true,
                 units_scale: 0.001,
                 wmode: 0,
+                code_32_width: None,
             },
         );
         widths
@@ -4799,6 +4807,7 @@ mod tests {
             is_cid,
             units_scale: 0.001,
             wmode: 0,
+            code_32_width: None,
         }
     }
 

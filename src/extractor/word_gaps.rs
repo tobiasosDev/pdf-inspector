@@ -50,12 +50,37 @@ const TAKE_BACK_MIN: f32 = 0.7;
 /// least 0.08 em, and 0.12 em for a font without metrics.
 pub(crate) fn word_gap_threshold(font_info: Option<&FontWidthInfo>) -> f32 {
     match font_info {
-        Some(font_info) => {
-            let space_em = font_info.space_width as f32 * font_info.units_scale;
-            (space_em * 1000.0 * 0.4).max(80.0)
-        }
+        Some(font_info) => space_threshold_of(font_info.space_width, font_info.units_scale),
         None => 120.0,
     }
+}
+
+/// 0.4 of a space `width` wide in a glyph space of `units_scale`, at least
+/// 0.08 em, in thousandths of the font size.
+fn space_threshold_of(width: u16, units_scale: f32) -> f32 {
+    (width as f32 * units_scale * 1000.0 * 0.4).max(80.0)
+}
+
+/// `TJ` offset, in thousandths of the font size, from which pen travel
+/// ends the sub-run as column positioning: [`COLUMN_GAP_THRESHOLDS`] word
+/// gaps. A font whose code 32 is no space
+/// ([`FontWidthInfo::code_32_width`]) sets its word gaps as pen travel,
+/// which justification stretches past four of its real word gaps; its
+/// column gap stays measured on that code-32 width, where it was before the
+/// space width was corrected, so a stretched word gap does not cut a line
+/// of prose into cells.
+pub(crate) fn column_gap_threshold(font_info: Option<&FontWidthInfo>) -> f32 {
+    let word_gap = match font_info {
+        Some(font_info) => space_threshold_of(
+            font_info
+                .code_32_width
+                .unwrap_or(0)
+                .max(font_info.space_width),
+            font_info.units_scale,
+        ),
+        None => 120.0,
+    };
+    word_gap * COLUMN_GAP_THRESHOLDS
 }
 
 /// Whether `spacing_ts` — the character spacing after a glyph shown at
@@ -645,24 +670,23 @@ pub(crate) fn tj_tracking(
 
 /// The word-gap and sub-run-ending thresholds, in thousandths of the font
 /// size, that a walker applies to the offsets of a `TJ` array. Without
-/// tracking they are the fixed thresholds: a word gap adds a space, a
-/// column gap ends the sub-run. Over the `tracking` read from the array
-/// (see [`tj_tracking`]) both move up by it, and for a run reading along x
-/// (`horizontal`) the word gap ends the sub-run as well, so each word keeps
-/// the box its glyphs span — a rotated run stays one item with its spaces,
-/// as the lines it joins are assembled from whole runs.
+/// tracking they are the fixed thresholds: a word gap (`space_threshold`)
+/// adds a space, a column gap (`column_threshold`, see
+/// [`column_gap_threshold`]) ends the sub-run. Over the `tracking` read
+/// from the array (see [`tj_tracking`]) both move up by it, and for a run
+/// reading along x (`horizontal`) the word gap ends the sub-run as well, so
+/// each word keeps the box its glyphs span — a rotated run stays one item
+/// with its spaces, as the lines it joins are assembled from whole runs.
 pub(crate) fn tj_gap_thresholds(
     space_threshold: f32,
+    column_threshold: f32,
     tracking: Option<f32>,
     horizontal: bool,
 ) -> (f32, f32) {
     match tracking {
         Some(tracking) if horizontal => (space_threshold + tracking, space_threshold + tracking),
-        Some(tracking) => (
-            space_threshold + tracking,
-            space_threshold * COLUMN_GAP_THRESHOLDS + tracking,
-        ),
-        None => (space_threshold, space_threshold * COLUMN_GAP_THRESHOLDS),
+        Some(tracking) => (space_threshold + tracking, column_threshold + tracking),
+        None => (space_threshold, column_threshold),
     }
 }
 
@@ -778,6 +802,7 @@ mod tests {
             is_cid: false,
             units_scale: 0.001,
             wmode: 0,
+            code_32_width: None,
         }
     }
 
@@ -1213,7 +1238,8 @@ mod tests {
         );
         assert_eq!(read("(1) -389 (2) -389 (3) -389 (4) -389 (5)"), None);
         assert_eq!(read("(C) -389 (e) -389 (n) -389 (t)"), None);
-        assert_eq!(read("(U) -389 (S)"), None);
+        // Two capitals are too few to tell from two one-letter words.
+        assert_eq!(read("(U) -389 (.) -389 (S)"), None);
         assert_eq!(read("(C) -460 (E) -460 (N) -460 (T)"), None);
         // Within three thresholds nothing changes.
         assert_eq!(read("(U) -300 (S) -300 (A)"), Some(300.0));
@@ -1290,10 +1316,32 @@ mod tests {
 
     #[test]
     fn gap_thresholds_follow_the_tracking() {
-        assert_eq!(tj_gap_thresholds(120.0, None, true), (120.0, 480.0));
-        assert_eq!(tj_gap_thresholds(120.0, None, false), (120.0, 480.0));
-        assert_eq!(tj_gap_thresholds(120.0, Some(250.0), true), (370.0, 370.0));
-        assert_eq!(tj_gap_thresholds(120.0, Some(250.0), false), (370.0, 730.0));
+        assert_eq!(tj_gap_thresholds(120.0, 480.0, None, true), (120.0, 480.0));
+        assert_eq!(tj_gap_thresholds(120.0, 480.0, None, false), (120.0, 480.0));
+        assert_eq!(
+            tj_gap_thresholds(120.0, 480.0, Some(250.0), true),
+            (370.0, 370.0)
+        );
+        assert_eq!(
+            tj_gap_thresholds(120.0, 480.0, Some(250.0), false),
+            (370.0, 730.0)
+        );
+    }
+
+    /// A font whose code 32 is no space keeps its column gap where the
+    /// code-32 width put it (JAMA's placeholder 497: 0.8 em), while its
+    /// word gap follows the corrected space (250: 0.1 em). Justified pen
+    /// travel of 0.5 em is then a stretched word gap, not a column.
+    #[test]
+    fn column_gaps_stay_on_a_replaced_code_32_width() {
+        let mut jama = font();
+        jama.space_width = 250;
+        jama.code_32_width = Some(497);
+        assert_eq!(word_gap_threshold(Some(&jama)), 100.0);
+        assert!((column_gap_threshold(Some(&jama)) - 795.2).abs() < 1e-3);
+        // Without a replaced width the column gap is four word gaps.
+        assert_eq!(column_gap_threshold(Some(&font())), 480.0);
+        assert_eq!(column_gap_threshold(None), 480.0);
     }
 
     /// The 600-unit test font with `^` as a zero-advance sign and `~` a

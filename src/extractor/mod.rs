@@ -1958,14 +1958,22 @@ fn numeric_fragment(text: &str) -> bool {
 }
 
 /// Whether `a` and `b`, two fragments of `line` shown over one another,
-/// are scripts on either side of a baseline: some fragment of the line at
+/// are scripts on either side of a baseline: a fragment of the line at
 /// least a script's size above both (see `scripts::SCRIPT_MAX_RATIO`) has
-/// its baseline between theirs.
+/// its baseline between theirs and touches the pair, ending at most half an
+/// em into it or a quarter em before it (or starting so after it), the
+/// window in which a script attaches to its anchor. Larger text further
+/// along the line (the other column) is no anchor.
 fn stacked_around_body_baseline(line: &[&TextItem], a: &TextItem, b: &TextItem) -> bool {
     let script = a.font_size.max(b.font_size);
+    let left = a.x.min(b.x);
+    let right = (a.x + effective_merge_width(a)).max(b.x + effective_merge_width(b));
     line.iter().any(|body| {
-        body.font_size * scripts::SCRIPT_MAX_RATIO >= script
+        let em = body.font_size;
+        let attached = |gap: f32| (-em * 0.5..=em * 0.25).contains(&gap);
+        em * scripts::SCRIPT_MAX_RATIO >= script
             && (a.y - body.y) * (b.y - body.y) < 0.0
+            && (attached(left - (body.x + effective_merge_width(body))) || attached(body.x - right))
     })
 }
 
@@ -2285,6 +2293,8 @@ fn merge_text_items_with_clips(
             };
 
             let mut j = i + 1;
+            // Whether the fragment before `next` joined the run as small caps.
+            let mut joined_small_caps = false;
             while j < group.len() {
                 let next = group[j];
                 let next_text: &str = &texts[j];
@@ -2304,10 +2314,13 @@ fn merge_text_items_with_clips(
                 {
                     break;
                 }
-                // Inside the band, a fragment of a script's size on its own
-                // baseline beside larger text is a script all the same (TeX
-                // sets the scripts of 9pt text at 7.3pt): it stays apart for
-                // `merge_subscript_items`. Small caps share their baseline.
+                // Inside the band, a script-shaped fragment of a script's
+                // size on its own baseline beside larger text is a script all
+                // the same (TeX sets the scripts of 9pt text at 7.3pt): it
+                // stays apart for `merge_subscript_items`. Small caps, on
+                // either side of the junction, and words or phrases of a
+                // smaller size keep merging: line assembly would give them
+                // no space.
                 let previous = group[j - 1];
                 let (small, large) = if next.font_size < previous.font_size {
                     (next, previous)
@@ -2315,8 +2328,10 @@ fn merge_text_items_with_clips(
                     (previous, next)
                 };
                 if !small_caps_join
+                    && !joined_small_caps
                     && small.font_size <= large.font_size * scripts::SCRIPT_MAX_RATIO
                     && (small.y - large.y).abs() >= large.font_size * scripts::SCRIPT_MIN_SHIFT
+                    && scripts::is_script_glyph_text(&small.text)
                 {
                     break;
                 }
@@ -2389,7 +2404,7 @@ fn merge_text_items_with_clips(
                 // rotated heading, a diagram label) keep merging.
                 if !preserve_stream_order
                     && (next.y - previous.y).abs() > previous.font_size * 0.5
-                    && gap < -effective_merge_width(next) * 0.5
+                    && gap < -effective_merge_width(next).min(effective_merge_width(previous)) * 0.5
                     && stacked_around_body_baseline(group, previous, next)
                 {
                     break;
@@ -2480,6 +2495,7 @@ fn merge_text_items_with_clips(
                 } else {
                     next_end
                 };
+                joined_small_caps = small_caps_join;
                 j += 1;
             }
 
@@ -5172,6 +5188,64 @@ mod tests {
         let merged = merge_text_items(items);
         let texts: Vec<&str> = merged.iter().map(|i| i.text.as_str()).collect();
         assert_eq!(texts, vec!["x", "a", "r"]);
+    }
+
+    #[test]
+    fn a_script_sized_fragment_stays_apart_only_when_it_is_script_shaped() {
+        // A lowered small-caps "D" (Amimo 2023's glossary: "DD<tab>
+        // Developmental") stays in its run: the junction before it was a
+        // small-caps join, and the tab fragment after it keeps its text.
+        let items = vec![
+            make_item_fs("D", 100.0, 500.0, 5.4, 7.5),
+            make_item_fs("D", 105.4, 499.0, 3.8, 5.25),
+            make_item_fs("\tDevelopmental", 109.3, 500.0, 50.0, 7.5),
+        ];
+        let merged = merge_text_items(items);
+        assert_eq!(merged.len(), 1, "{merged:?}");
+        assert_eq!(merged[0].text, "DD\tDevelopmental");
+        // A smaller phrase set off the baseline (a designed heading) is no
+        // script: it merges and keeps its word gap.
+        let items = vec![
+            make_item_fs("Chapter 3", 100.0, 500.0, 54.0, 12.0),
+            make_item_fs("Introduction and Scope", 157.0, 498.5, 110.0, 10.0),
+        ];
+        let merged = merge_text_items(items);
+        assert_eq!(merged.len(), 1, "{merged:?}");
+        assert_eq!(merged[0].text, "Chapter 3 Introduction and Scope");
+        // A script-shaped one (TeX's 7.27pt index of 8.97pt text) does not.
+        let items = vec![
+            make_item_fs("x", 100.0, 282.89, 4.26, 8.97),
+            make_item_fs("k", 104.37, 280.92, 3.77, 7.27),
+        ];
+        assert_eq!(merge_text_items(items).len(), 2);
+    }
+
+    #[test]
+    fn stacked_scripts_need_their_anchor_beside_them() {
+        // A narrow subscript first, a wide superscript over it (x with i
+        // under (l)): two scripts.
+        let items = vec![
+            make_item_fs("x", 91.9, 511.3, 5.0, 10.0),
+            make_item_fs("i", 96.9, 507.3, 2.0, 7.4),
+            make_item_fs("(l)", 96.95, 515.2, 8.0, 7.4),
+        ];
+        let merged = merge_text_items(items);
+        let texts: Vec<&str> = merged.iter().map(|i| i.text.as_str()).collect();
+        assert_eq!(texts, vec!["x", "i", "(l)"]);
+        // Larger text far along the line (the other column, shown first so
+        // that it seeds the line both letters fall into) is no anchor:
+        // stacked letters of a label keep merging.
+        let items = vec![
+            make_item_fs("body text", 250.0, 511.3, 40.0, 10.0),
+            make_item_fs("a", 96.9, 515.2, 3.7, 7.4),
+            make_item_fs("r", 96.9, 507.3, 3.7, 7.4),
+        ];
+        let merged = merge_text_items(items);
+        assert!(
+            merged.iter().any(|i| i.text.contains("ar")),
+            "{:?}",
+            merged.iter().map(|i| i.text.as_str()).collect::<Vec<_>>()
+        );
     }
 
     /// Small caps as typesetters emit them: a full-size capital at 9.98pt

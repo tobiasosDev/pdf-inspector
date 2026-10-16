@@ -183,6 +183,13 @@ pub(crate) struct FontWidthInfo {
     pub(crate) units_scale: f32,
     /// Writing mode: 0 = horizontal (default), 1 = vertical
     pub(crate) wmode: u8,
+    /// The advance the width table gives code 32 when that code is no space
+    /// and `space_width` was taken from elsewhere (see
+    /// `fonts::code_32_space_width`); `None` otherwise. Such a font sets its
+    /// word gaps as pen travel, which justification stretches: the gap that
+    /// ends a `TJ` sub-run as column positioning stays measured on this
+    /// width (see `word_gaps::column_gap_threshold`).
+    pub(crate) code_32_width: Option<u16>,
 }
 
 /// Glyphs a width table has to carry, all sharing one advance, before it
@@ -967,12 +974,7 @@ impl TextLine {
         }
 
         // Detect subscript/superscript: smaller font size and/or Y offset
-        let font_ratio = item.font_size / prev_item.font_size;
-        let reverse_font_ratio = prev_item.font_size / item.font_size;
-        let y_diff = (item.y - prev_item.y).abs();
-
-        let is_sub_super = font_ratio < 0.85 && y_diff > 1.0;
-        let was_sub_super = reverse_font_ratio < 0.85 && y_diff > 1.0;
+        let unflagged_script = unflagged_script_junction(prev_item, item);
 
         // Use position-based spacing detection
         let should_join = should_join_items(prev_item, item, single_char_threshold);
@@ -981,11 +983,29 @@ impl TextLine {
         !(prev_ends_with_hyphen
             || curr_is_hyphen
             || curr_starts_with_hyphen
-            || is_sub_super
-            || was_sub_super
+            || unflagged_script
             || should_join
             || space_already_exists)
     }
+}
+
+/// Whether two neighbouring items of a line that extraction did not flag as
+/// a script run still meet as one, so the junction takes no space: one is
+/// under 0.85 of the other's size on a baseline more than 1pt off, and they
+/// touch. A measured word gap between a smaller word set off the baseline
+/// and the text beside it is a word gap all the same (see
+/// [`SCRIPT_WORD_GAP`]); an estimated advance measures nothing, and its
+/// junction keeps no space as before.
+fn unflagged_script_junction(prev: &TextItem, item: &TextItem) -> bool {
+    let ratio = item.font_size.min(prev.font_size) / item.font_size.max(prev.font_size);
+    let gap = if prev.x <= item.x {
+        item.x - (prev.x + prev.width)
+    } else {
+        prev.x - (item.x + item.width)
+    };
+    let touching = !(prev.advance_known && item.advance_known)
+        || gap < prev.font_size.max(item.font_size) * SCRIPT_WORD_GAP;
+    ratio < 0.85 && (item.y - prev.y).abs() > 1.0 && touching
 }
 
 #[cfg(test)]
@@ -1046,6 +1066,22 @@ mod formatting_tests {
         it.y += shift;
         it.baseline_shift = shift;
         it
+    }
+
+    /// A smaller word set off the baseline and not flagged as a script
+    /// takes its measured word gap ("Employer OMB No.", "Avviso Se"); a
+    /// smaller glyph that touches its word keeps no space, as before.
+    #[test]
+    fn an_unflagged_smaller_word_keeps_its_word_gap() {
+        let mut small = item("OMB No.", 52.0, 30.0, false);
+        small.font_size = 8.0;
+        small.y = 101.5;
+        let rendered = line(vec![body("Employer", 0.0, 50.0), small.clone()]).text();
+        assert_eq!(rendered, "Employer OMB No.");
+        small.x = 50.0;
+        small.text = "2".into();
+        let rendered = line(vec![body("H", 40.0, 10.0), small]).text();
+        assert_eq!(rendered, "H2");
     }
 
     #[test]

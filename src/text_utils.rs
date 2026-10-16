@@ -83,11 +83,27 @@ pub(crate) fn is_page_number_line(text: &str) -> bool {
     })
 }
 
-/// Whether `c` is one of the Mathematical Alphanumeric Symbols
-/// (U+1D400–U+1D7FF): the italic, bold and script letters and digits of a
-/// formula (𝑥, 𝐊, 𝟏), never a letter of running text.
+/// Whether `c` is a math letter or digit: the Mathematical Alphanumeric
+/// Symbols (U+1D400–U+1D7FF: 𝑥, 𝐊, 𝟏) and the letters of that alphabet
+/// Unicode keeps in Letterlike Symbols, where the block has holes (math
+/// italic ℎ, ℓ, the script, fraktur and double-struck capitals ℒ ℌ ℝ, and
+/// ℊ ℯ ℴ). Never a letter of running text.
 pub(crate) fn is_math_alphanumeric(c: char) -> bool {
     ('\u{1D400}'..='\u{1D7FF}').contains(&c)
+        || matches!(
+            c,
+            '\u{2102}'
+                | '\u{210A}'..='\u{2113}'
+                | '\u{2115}'
+                | '\u{2119}'..='\u{211D}'
+                | '\u{2124}'
+                | '\u{2128}'
+                | '\u{212C}'
+                | '\u{212D}'
+                | '\u{212F}'..='\u{2131}'
+                | '\u{2133}'
+                | '\u{2134}'
+        )
 }
 
 /// Check if a character is CJK (Chinese, Japanese, Korean).
@@ -2239,6 +2255,10 @@ mod tests {
         let and = make_text_item(", and", 370.8, 17.2, fs);
         let after_and = make_text_item("𝑦", 389.6, 4.6, fs);
         assert!(!should_join_items(&and, &after_and, threshold));
+        // Math italic h sits in Letterlike Symbols (U+210E), not in the
+        // Mathematical Alphanumeric block.
+        let h = make_text_item("ℎ", 190.5, 4.6, fs);
+        assert!(!should_join_items(&word, &h, threshold));
         let b = make_text_item("b", 100.0, 5.0, fs);
         let illion = make_text_item("illion", 106.7, 20.0, fs);
         assert!(should_join_items(&b, &illion, threshold));
