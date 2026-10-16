@@ -83,6 +83,13 @@ pub(crate) fn is_page_number_line(text: &str) -> bool {
     })
 }
 
+/// Whether `c` is one of the Mathematical Alphanumeric Symbols
+/// (U+1D400–U+1D7FF): the italic, bold and script letters and digits of a
+/// formula (𝑥, 𝐊, 𝟏), never a letter of running text.
+pub(crate) fn is_math_alphanumeric(c: char) -> bool {
+    ('\u{1D400}'..='\u{1D7FF}').contains(&c)
+}
+
 /// Check if a character is CJK (Chinese, Japanese, Korean).
 /// CJK languages don't use spaces between words, so word-boundary
 /// heuristics should not apply when CJK characters are involved.
@@ -1306,7 +1313,18 @@ pub(crate) fn should_join_items(
         // Single-character fragment joined to a multi-character item: use a
         // moderately generous threshold to rejoin split words like "b" + "illion"
         // or "C" + "ultural". Gap near 0 = same word; gap ~0.2+ = different words.
-        if (prev_chars == 1) != (curr_chars == 1) {
+        // A math letter (𝑥, 𝑦: Mathematical Alphanumeric Symbols) is never
+        // the split-off letter of a text word: between it and a word, a
+        // word space TeX shrank to 0.16–0.19 em still separates ("word 𝑦",
+        // not "word𝑦"), and the tighter threshold below applies.
+        let math_letter_beside_word = match (prev_last_char, curr_first_char) {
+            (Some(p), Some(c)) => {
+                (is_math_alphanumeric(p) && c.is_alphabetic() && !is_math_alphanumeric(c))
+                    || (is_math_alphanumeric(c) && p.is_alphabetic() && !is_math_alphanumeric(p))
+            }
+            _ => false,
+        };
+        if (prev_chars == 1) != (curr_chars == 1) && !math_letter_beside_word {
             return gap < font_size * 0.20;
         }
 
@@ -2205,6 +2223,28 @@ mod tests {
             mcid: None,
             baseline_shift: 0.0,
         }
+    }
+
+    /// A word and a math letter one shrunk TeX word space apart (0.19 em:
+    /// "each output word 𝑦̂ₘ", arXiv 2403.08946) take a space; a split-off
+    /// text letter at the same gap still rejoins its word, and so does a
+    /// math letter before a parenthesis.
+    #[test]
+    fn a_math_letter_is_no_split_off_letter_of_a_word() {
+        let fs = 9.0;
+        let threshold = 0.10;
+        let word = make_text_item("each output word", 73.4, 115.4, fs);
+        let math_y = make_text_item("𝑦", 190.5, 4.6, fs);
+        assert!(!should_join_items(&word, &math_y, threshold));
+        let and = make_text_item(", and", 370.8, 17.2, fs);
+        let after_and = make_text_item("𝑦", 389.6, 4.6, fs);
+        assert!(!should_join_items(&and, &after_and, threshold));
+        let b = make_text_item("b", 100.0, 5.0, fs);
+        let illion = make_text_item("illion", 106.7, 20.0, fs);
+        assert!(should_join_items(&b, &illion, threshold));
+        let f = make_text_item("𝐹", 100.0, 5.5, fs);
+        let args = make_text_item("(1,94)", 107.2, 22.0, fs);
+        assert!(should_join_items(&f, &args, threshold));
     }
 
     #[test]

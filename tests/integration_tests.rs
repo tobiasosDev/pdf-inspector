@@ -594,6 +594,38 @@ fn test_group_into_lines_sorting_by_x() {
     assert_eq!(lines[0].text(), "First Second Third");
 }
 
+/// Scripts as TeX sets them in 9pt text (the ACM layout): no text rise, the
+/// script moved with `Tm` to its own baseline at 7.3pt (0.81 of the body),
+/// and the limits of a set stacked at one x, the superscript over the
+/// subscript. Modelled on arXiv 2403.08946 p. 4: "{(x̃ₖ, ỹₖ)}ₖ₌₁ᴷ, where
+/// x̃ₖ is usually obtained".
+#[test]
+fn test_tex_scripts_of_nine_point_text_are_tagged() {
+    // Helvetica: "where x" is 3501/1000 em, "the set {x}" 4448/1000 em.
+    let content = "BT\n\
+        /F1 9 Tf 1 0 0 1 72 700 Tm (where x) Tj\n\
+        /F1 7.3 Tf 1 0 0 1 103.51 698.03 Tm (k) Tj\n\
+        /F1 9 Tf 1 0 0 1 109.66 700 Tm (is usually obtained by perturbing x.) Tj\n\
+        /F1 9 Tf 1 0 0 1 72 680 Tm (the set {x}) Tj\n\
+        /F1 7.3 Tf 1 0 0 1 112.03 683.25 Tm (K) Tj\n\
+        1 0 0 1 111.88 676.08 Tm (k=1) Tj\n\
+        /F1 9 Tf 1 0 0 1 126 680 Tm (holds.) Tj\n\
+        ET";
+    let pdf = make_text_pdf(content, "0 0 595 842");
+    let markdown = process_pdf_mem(&pdf)
+        .expect("convert PDF to markdown")
+        .markdown
+        .expect("markdown output");
+    assert!(
+        markdown.contains("where x<sub>k</sub> is usually obtained by perturbing x."),
+        "{markdown}"
+    );
+    assert!(
+        markdown.contains("the set {x}<sub>k=1</sub><sup>K</sup> holds."),
+        "{markdown}"
+    );
+}
+
 #[test]
 fn test_digit_only_text_runs_are_preserved_in_markdown() {
     let pdf = make_digit_run_repro_pdf();

@@ -1957,6 +1957,18 @@ fn numeric_fragment(text: &str) -> bool {
             .all(|c| c.is_numeric() || is_number_separator(c))
 }
 
+/// Whether `a` and `b`, two fragments of `line` shown over one another,
+/// are scripts on either side of a baseline: some fragment of the line at
+/// least a script's size above both (see `scripts::SCRIPT_MAX_RATIO`) has
+/// its baseline between theirs.
+fn stacked_around_body_baseline(line: &[&TextItem], a: &TextItem, b: &TextItem) -> bool {
+    let script = a.font_size.max(b.font_size);
+    line.iter().any(|body| {
+        body.font_size * scripts::SCRIPT_MAX_RATIO >= script
+            && (a.y - body.y) * (b.y - body.y) < 0.0
+    })
+}
+
 /// A fragment of nothing but number separators: a comma or point shown
 /// apart from its digits.
 fn separator_fragment(text: &str) -> bool {
@@ -2292,6 +2304,22 @@ fn merge_text_items_with_clips(
                 {
                     break;
                 }
+                // Inside the band, a fragment of a script's size on its own
+                // baseline beside larger text is a script all the same (TeX
+                // sets the scripts of 9pt text at 7.3pt): it stays apart for
+                // `merge_subscript_items`. Small caps share their baseline.
+                let previous = group[j - 1];
+                let (small, large) = if next.font_size < previous.font_size {
+                    (next, previous)
+                } else {
+                    (previous, next)
+                };
+                if !small_caps_join
+                    && small.font_size <= large.font_size * scripts::SCRIPT_MAX_RATIO
+                    && (small.y - large.y).abs() >= large.font_size * scripts::SCRIPT_MIN_SHIFT
+                {
+                    break;
+                }
                 // Preserve the existing join behavior at non-bold style
                 // boundaries, including italic fragments within formulas.
                 if next.is_italic != first.is_italic
@@ -2330,7 +2358,6 @@ fn merge_text_items_with_clips(
                 {
                     break;
                 }
-                let previous = group[j - 1];
                 if clip_boundaries::separated_runs(
                     previous,
                     clip_by_item.get(&(previous as *const TextItem)),
@@ -2351,6 +2378,19 @@ fn merge_text_items_with_clips(
                     && gap < -effective_merge_width(next) * 0.5
                     && digits(text.trim())
                     && digits(next_text.trim())
+                {
+                    break;
+                }
+                // Scripts stacked over one another — the limits of a set
+                // ({…}ₖ₌₁ under ᴷ), an index under an exponent — stand on
+                // either side of the baseline of larger text on their line:
+                // a superscript and a subscript, not one word. Stacked
+                // letters with no larger text between their baselines (a
+                // rotated heading, a diagram label) keep merging.
+                if !preserve_stream_order
+                    && (next.y - previous.y).abs() > previous.font_size * 0.5
+                    && gap < -effective_merge_width(next) * 0.5
+                    && stacked_around_body_baseline(group, previous, next)
                 {
                     break;
                 }
@@ -5107,10 +5147,11 @@ mod tests {
         let merged = merge_text_items(items);
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].text, "Freon®");
-        // Stacked LETTERS in the same band (a rotated label beside body
-        // text) keep merging as before — only digit pairs are fractions.
+        // Stacked LETTERS in the same band with no larger text between
+        // their baselines (a label stacked beside text of its own size)
+        // keep merging.
         let items = vec![
-            make_item_fs("x", 91.9, 511.3, 5.0, 10.0),
+            make_item_fs("x", 91.9, 511.3, 3.7, 7.4),
             make_item_fs("a", 96.9, 515.2, 3.7, 7.4),
             make_item_fs("r", 96.9, 507.3, 3.7, 7.4),
         ];
@@ -5120,6 +5161,17 @@ mod tests {
             "{:?}",
             merged.iter().map(|i| i.text.as_str()).collect::<Vec<_>>()
         );
+        // Stacked letters on either side of the body baseline are a
+        // superscript over a subscript (x with a over r, sᵢ with t, the
+        // limits of a set) and stay two items.
+        let items = vec![
+            make_item_fs("x", 91.9, 511.3, 5.0, 10.0),
+            make_item_fs("a", 96.9, 515.2, 3.7, 7.4),
+            make_item_fs("r", 96.9, 507.3, 3.7, 7.4),
+        ];
+        let merged = merge_text_items(items);
+        let texts: Vec<&str> = merged.iter().map(|i| i.text.as_str()).collect();
+        assert_eq!(texts, vec!["x", "a", "r"]);
     }
 
     /// Small caps as typesetters emit them: a full-size capital at 9.98pt

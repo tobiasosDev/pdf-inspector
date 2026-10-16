@@ -64,9 +64,12 @@ pub(crate) fn merge_subscript_items(items: Vec<TextItem>) -> Vec<TextItem> {
 }
 
 /// Largest script-to-anchor font-size ratio. Real sub/superscripts run
-/// 0.5–0.7 of the body size; 0.75 leaves room for producers that shrink less
-/// while keeping small caps (≈0.8) and ordinary size changes out.
-const SCRIPT_MAX_RATIO: f32 = 0.75;
+/// 0.5–0.7 of the body size, but TeX sets the scripts of 9 pt text at
+/// 7.3 pt (0.81, the ACM layout) and journals set affiliation and note
+/// markers at 0.8. Small caps (≈0.8) stay out by their level baseline
+/// ([`SCRIPT_MIN_SHIFT`]), not by size; line assembly reads a size change
+/// under 0.85 at a baseline offset as a script the same way.
+pub(super) const SCRIPT_MAX_RATIO: f32 = 0.85;
 /// Smallest ratio: body text beside a drop cap or a display figure is far
 /// smaller than this, and never a script of it.
 const SCRIPT_MIN_RATIO: f32 = 0.4;
@@ -76,7 +79,7 @@ const SCRIPT_MIN_RATIO: f32 = 0.4;
 const SCRIPT_RUN_SIZE_STEP: f32 = 0.2;
 /// Minimum |baseline offset| as a fraction of the anchor size. Level runs —
 /// small caps, a smaller label on the same baseline — are not scripts.
-const SCRIPT_MIN_SHIFT: f32 = 0.1;
+pub(super) const SCRIPT_MIN_SHIFT: f32 = 0.1;
 /// Largest raise (superscript) and drop (subscript), as fractions of the
 /// anchor size. Superscripts sit around 0.33–0.45 em up, subscripts
 /// 0.15–0.3 em down; ruby/annotation text above a line starts near 0.9 em.
@@ -148,6 +151,7 @@ fn is_script_marker_symbol(c: char) -> bool {
             | '{'
             | '}'
             | '+'
+            | '='
             | '-'
             | '−'
             | '–'
@@ -738,9 +742,16 @@ mod tests {
             "{:?}",
             merged[1]
         );
-        // The sign alone keeps its own size, past a script's.
-        let merged = exponent(vec![make_item_fs("\u{2212}", 253.1, 195.75, 6.1, 7.89)]);
+        // The sign alone keeps its own size: past a script's (8.9pt beside
+        // 10.16pt, over `SCRIPT_MAX_RATIO`), it is no script, while beside
+        // its digit the same sign sizes the run by the digit.
+        let merged = exponent(vec![make_item_fs("\u{2212}", 253.1, 195.75, 6.1, 8.9)]);
         assert!(merged.iter().all(|item| !item.is_script()), "{merged:?}");
+        let merged = exponent(vec![
+            make_item_fs("\u{2212}", 253.1, 195.75, 6.1, 8.9),
+            make_item_fs("3", 259.3, 195.75, 3.8, 7.57),
+        ]);
+        assert_eq!(texts(&merged), vec!["pc cm", "\u{2212}3", "), were"]);
         // Signs that grow a step at a time from a digit's size to the body
         // size are no sign of a symbol font: the run is as large as its
         // largest glyph, and no script.
@@ -748,6 +759,33 @@ mod tests {
             make_item_fs("7", 253.1, 195.75, 3.5, 7.0),
             make_item_fs("(", 256.6, 195.75, 2.8, 8.5),
             make_item_fs(")", 259.4, 195.75, 3.4, 10.2),
+        ]);
+        assert!(merged.iter().all(|item| !item.is_script()), "{merged:?}");
+    }
+
+    /// TeX's scripts of 9pt text (the ACM layout, arXiv 2403.08946): 7.27pt
+    /// beside 8.97pt, 0.81 of the body, moved 1.97pt down with `Tm`; the
+    /// lower limit of a set ("k=1") is one run, its `=` included.
+    #[test]
+    fn tex_scripts_of_nine_point_text_are_scripts() {
+        let merged = merge_subscript_items(vec![
+            make_item_fs("𝑥", 100.0, 282.89, 4.26, 8.97),
+            make_item_fs("𝑘", 104.37, 280.92, 3.77, 7.27),
+            make_item_fs("is usually", 111.3, 282.89, 40.0, 8.97),
+        ]);
+        assert_eq!(texts(&merged), vec!["𝑥", "𝑘", "is usually"]);
+        assert!((merged[1].baseline_shift + 1.97).abs() < 1e-3, "{merged:?}");
+        let merged = merge_subscript_items(vec![
+            make_item_fs(")}", 186.1, 282.89, 7.34, 8.97),
+            make_item_fs("𝑘", 193.38, 278.97, 3.77, 7.27),
+            make_item_fs("=1", 197.73, 278.97, 7.69, 7.27),
+        ]);
+        assert_eq!(texts(&merged), vec![")}", "𝑘=1"]);
+        assert!(merged[1].baseline_shift < 0.0, "{merged:?}");
+        // Small caps at 0.8 of the capital share its baseline: no script.
+        let merged = merge_subscript_items(vec![
+            make_item_fs("R", 100.0, 500.0, 7.2, 10.0),
+            make_item_fs("OLANDO", 107.2, 500.0, 30.0, 8.0),
         ]);
         assert!(merged.iter().all(|item| !item.is_script()), "{merged:?}");
     }
