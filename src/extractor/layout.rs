@@ -1144,6 +1144,12 @@ fn page_number_value(item: &TextItem) -> Option<u32> {
         return None;
     }
 
+    // A script run belongs to the word it is attached to ("AI/m²" near the
+    // foot of a page), never a folio.
+    if item.is_script() {
+        return None;
+    }
+
     // Must be at top or bottom of page.
     // US Letter = 792pt, A4 = 841pt. Page numbers are typically in the
     // top ~5% or bottom ~12% of the page.
@@ -3133,6 +3139,21 @@ mod tests {
             mcid: None,
             baseline_shift: 0.0,
         }
+    }
+
+    /// A digit run flagged as a script near the foot of a page ("AI/m²" in
+    /// WHO's malaria guidelines) is part of its word, never a folio; a bare
+    /// digit there still is a candidate.
+    #[test]
+    fn a_script_digit_near_the_page_foot_is_no_page_number() {
+        let mut exponent = make_item(1, 468.8, 65.4, "2");
+        exponent.font_size = 7.5;
+        exponent.baseline_shift = 4.07;
+        assert_eq!(page_number_value(&exponent), None);
+        assert_eq!(
+            page_number_value(&make_item(1, 300.0, 40.0, "63")),
+            Some(63)
+        );
     }
 
     /// A dense block of single-column prose lines at `x` starting from

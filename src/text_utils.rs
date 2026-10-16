@@ -84,10 +84,10 @@ pub(crate) fn is_page_number_line(text: &str) -> bool {
 }
 
 /// Whether `c` is a math letter or digit: the Mathematical Alphanumeric
-/// Symbols (U+1D400–U+1D7FF: 𝑥, 𝐊, 𝟏) and the letters of that alphabet
-/// Unicode keeps in Letterlike Symbols, where the block has holes (math
-/// italic ℎ, ℓ, the script, fraktur and double-struck capitals ℒ ℌ ℝ, and
-/// ℊ ℯ ℴ). Never a letter of running text.
+/// Symbols (U+1D400–U+1D7FF: 𝑥, 𝐊, 𝟏) and the math letters of Letterlike
+/// Symbols — those the block leaves to it (math italic ℎ, the script,
+/// fraktur and double-struck capitals ℒ ℌ ℝ, ℊ ℯ ℴ) and ℏ and ℓ. Never a
+/// letter of running text.
 pub(crate) fn is_math_alphanumeric(c: char) -> bool {
     ('\u{1D400}'..='\u{1D7FF}').contains(&c)
         || matches!(

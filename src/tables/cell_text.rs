@@ -18,8 +18,10 @@ pub(crate) fn cell_fragment(item: &TextItem, text: &str) -> String {
     fragment
 }
 
-/// Join cell items with subscript/superscript-aware spacing
-/// Same logic as TextLine::text() but for table cells
+/// Join cell items with subscript/superscript-aware spacing, as
+/// `TextLine::text()` does for flagged script runs. An unflagged size and
+/// baseline change keeps no space here whatever the gap; line rendering
+/// keeps a measured word gap there (`types::unflagged_script_junction`).
 pub(crate) fn join_cell_items(items: &[&TextItem]) -> String {
     let mut result = String::new();
     let mut last: Option<&TextItem> = None;

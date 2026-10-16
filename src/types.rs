@@ -1078,6 +1078,16 @@ mod formatting_tests {
         small.y = 101.5;
         let rendered = line(vec![body("Employer", 0.0, 50.0), small.clone()]).text();
         assert_eq!(rendered, "Employer OMB No.");
+        // A one-word heading part set smaller and lower.
+        let mut aims = small.clone();
+        aims.text = "Aims".into();
+        let rendered = line(vec![body("Chapter 3", 0.0, 50.0), aims.clone()]).text();
+        assert_eq!(rendered, "Chapter 3 Aims");
+        // An estimated advance measures no gap: the junction keeps no space.
+        aims.advance_known = false;
+        let mut chapter = body("Chapter 3", 0.0, 50.0);
+        chapter.advance_known = false;
+        assert_eq!(line(vec![chapter, aims]).text(), "Chapter 3Aims");
         small.x = 50.0;
         small.text = "2".into();
         let rendered = line(vec![body("H", 40.0, 10.0), small]).text();
