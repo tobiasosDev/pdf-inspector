@@ -1130,7 +1130,21 @@ const ADJACENT_PAGE_MIN_CONTENT_WIDTH_EM: f32 = 26.0;
 
 type ContextualCandidateOccurrence = (u32, f32, Vec<(usize, u32)>);
 
+/// The value of a numeric item that could be a page number: one to four
+/// digits at the top or bottom of the page, and no script run. A script
+/// belongs to the word it is attached to ("AI/m²" near the foot of a
+/// page), never a folio, so page-number removal leaves it alone.
 fn page_number_value(item: &TextItem) -> Option<u32> {
+    if item.is_script() {
+        return None;
+    }
+    page_edge_number_value(item)
+}
+
+/// The value of one to four digits at the top or bottom of the page,
+/// script or not: column detection leaves all of them out, as numbers in
+/// the page margins say nothing about the columns of the body.
+fn page_edge_number_value(item: &TextItem) -> Option<u32> {
     if !matches!(
         item.item_type,
         crate::types::ItemType::Text | crate::types::ItemType::FormField
@@ -1141,12 +1155,6 @@ fn page_number_value(item: &TextItem) -> Option<u32> {
     let text = item.text.trim();
 
     if text.is_empty() || text.len() > 4 || !text.chars().all(|c| c.is_ascii_digit()) {
-        return None;
-    }
-
-    // A script run belongs to the word it is attached to ("AI/m²" near the
-    // foot of a page), never a folio.
-    if item.is_script() {
         return None;
     }
 
@@ -1585,8 +1593,10 @@ fn page_number_context_masks(
                     .iter()
                     .filter(|&&index| numeric_like(items[index].text.trim()))
                     .count();
+                // Longer than a folio: a script digit is no candidate either,
+                // but no long integer.
                 let has_long_integer = group.iter().any(|&index| {
-                    candidate_values[index].is_none()
+                    page_edge_number_value(&items[index]).is_none()
                         && items[index]
                             .text
                             .trim()
@@ -2218,7 +2228,7 @@ fn group_into_lines_with_thresholds_and_regions_impl(
         // from changing the page's inferred layout.
         let column_detection_items: Vec<TextItem> = page_items
             .iter()
-            .filter(|item| page_number_value(item).is_none())
+            .filter(|item| page_edge_number_value(item).is_none())
             .cloned()
             .collect();
         let column_detection_items = column_detection_items.as_slice();
@@ -2279,7 +2289,7 @@ fn group_into_lines_with_thresholds_and_regions_impl(
                 let col_input: Vec<TextItem> = page_items
                     .iter()
                     .filter(|it| {
-                        if page_number_value(it).is_some() {
+                        if page_edge_number_value(it).is_some() {
                             return false;
                         }
                         let cx = it.x + it.width / 2.0;
@@ -3154,6 +3164,16 @@ mod tests {
             page_number_value(&make_item(1, 300.0, 40.0, "63")),
             Some(63)
         );
+        // Column detection still leaves margin digits out, script or not.
+        assert_eq!(page_edge_number_value(&exponent), Some(2));
+        // Page-number removal keeps the exponent with its words.
+        let items = vec![
+            make_item(1, 60.0, 61.3, "300 mg AI/m"),
+            exponent,
+            make_item(1, 473.0, 61.3, ") was made to the"),
+        ];
+        let kept = filter_markdown_page_numbers(items, 463);
+        assert!(kept.iter().any(|item| item.text == "2"), "{kept:?}");
     }
 
     /// A dense block of single-column prose lines at `x` starting from
