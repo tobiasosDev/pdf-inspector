@@ -226,12 +226,6 @@ fn join_decision(a: &str, b: &str, proven: bool, vocabulary: &Vocabulary) -> Joi
         && !tokens.contains(&a.to_lowercase())
         && !(b.chars().count() < 4 && tokens.contains(&b.to_lowercase()))
     {
-        if tokens.contains(&b.to_lowercase()) {
-            // The continuation is a word of its own ("eighteen- month",
-            // "commercial- type"): a compound broken at its hyphen reads
-            // better kept than fused.
-            return Join::Hyphen;
-        }
         // No vocabulary evidence, but the layout proved the break: the
         // hyphen ended a line and the next line of the same column goes on
         // in lowercase, so this is no interleaved-column noise. A head that
@@ -239,8 +233,11 @@ fn join_decision(a: &str, b: &str, proven: bool, vocabulary: &Vocabulary) -> Joi
         // "re- sults"). Two shapes stay: a head the document uses as a word
         // ("world- class" may be a compound broken at its own hyphen) and a
         // short continuation the document uses on its own (the conjunction
-        // after a suspended hyphen, "pre- and post-test"). A longer
-        // continuation the document uses on its own keeps the hyphen above.
+        // after a suspended hyphen, "pre- and post-test"). A compound broken
+        // at its own hyphen with no evidence either way ("eighteen- month"
+        // in a text that never writes it whole) fuses: at a proven line end
+        // a syllable break ("aver- ages", "addi- tion") is far more likely,
+        // and its continuation is often a word too.
         Join::Plain
     } else {
         // No evidence at all: leave the break as it is. An unconditional join
@@ -799,13 +796,19 @@ mod tests {
     }
 
     #[test]
-    fn proven_breaks_before_a_word_of_the_document_keep_the_hyphen() {
-        // "eighteen- month" where "month" stands on its own elsewhere: a
-        // compound broken at its own hyphen, not a syllable.
-        let text = format!("An {} lag. Each month counts.", proven("eighteen", "month"));
+    fn proven_breaks_join_before_a_continuation_that_is_a_word() {
+        // JAMA 2018: "aver- ages" and "addi- tion" end lines; "ages" is a
+        // word of the document too. A compound needs evidence to keep its
+        // hyphen ("eighteen-month" written whole elsewhere).
+        let text = format!(
+            "Mean {} by age; ages vary. In {}, an {} lag after the eighteen-month mark.",
+            proven("aver", "ages"),
+            proven("addi", "tion"),
+            proven("eighteen", "month"),
+        );
         assert_eq!(
             dehyphenate_line_breaks(&text),
-            "An eighteen-month lag. Each month counts."
+            "Mean averages by age; ages vary. In addition, an eighteen-month lag after the eighteen-month mark."
         );
     }
 
