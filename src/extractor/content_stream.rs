@@ -26,9 +26,9 @@ use super::geometry::{
 use super::text_paint::{PaintResources, TextPaint};
 use super::underline::UnderlineLine;
 use super::word_gaps::{
-    column_gap_threshold, is_dependent_sign, offset_takes_spacing_back, tj_gap_thresholds,
-    tj_tracking, word_gap_candidate, word_gap_threshold, PenHighWater, PendingWordGaps,
-    WordGapCandidate,
+    array_takes_spacing_back, column_gap_threshold, is_dependent_sign, offset_takes_spacing_back,
+    spacing_after_string, tj_gap_thresholds, tj_tracking, word_gap_candidate, word_gap_threshold,
+    PenHighWater, PendingWordGaps, WordGapCandidate,
 };
 use super::xobjects::{extract_form_xobject_text, get_page_xobjects, FormWalkBudget, XObjectType};
 use super::{get_number, image_bbox_from_ctm, multiply_matrices};
@@ -1187,6 +1187,22 @@ pub(crate) fn extract_page_text_items_with_options(
                         // Word-space threshold for `TJ` offsets and character
                         // spacing alike, from the font metrics when available.
                         let space_threshold = word_gap_threshold(font_info);
+                        // Character and word spacing count toward the gaps
+                        // the offsets open only where the array takes its
+                        // spacing back inside words (see
+                        // `array_takes_spacing_back`); elsewhere it is
+                        // tracking and the offsets are judged alone.
+                        let (gap_char_spacing, gap_word_spacing) = if array_takes_spacing_back(
+                            array,
+                            font_info,
+                            current_font_size,
+                            char_spacing,
+                            word_spacing,
+                        ) {
+                            (char_spacing, word_spacing)
+                        } else {
+                            (0.0, 0.0)
+                        };
                         // A tracked display run — one glyph per string, the
                         // letter spacing as the offset between them — is
                         // judged over its own tracking (see `tj_tracking`
@@ -1201,21 +1217,30 @@ pub(crate) fn extract_page_text_items_with_options(
                             None
                         } else {
                             let mut probe_decisions: Option<CMapDecisionCache> = None;
-                            tj_tracking(array, font_info, space_threshold, |element| {
-                                extract_text_from_operand(
-                                    element,
-                                    &current_font,
-                                    font_base_names.get(&current_font).map(|s| s.as_str()),
-                                    font_cmaps,
-                                    &font_tounicode_refs,
-                                    &inline_cmaps,
-                                    &font_encodings,
-                                    &encoding_cache,
-                                    probe_decisions.get_or_insert_with(|| cmap_decisions.clone()),
-                                    &font_widths,
-                                    &font_kinds,
-                                )
-                            })
+                            tj_tracking(
+                                array,
+                                font_info,
+                                space_threshold,
+                                current_font_size,
+                                gap_char_spacing,
+                                gap_word_spacing,
+                                |element| {
+                                    extract_text_from_operand(
+                                        element,
+                                        &current_font,
+                                        font_base_names.get(&current_font).map(|s| s.as_str()),
+                                        font_cmaps,
+                                        &font_tounicode_refs,
+                                        &inline_cmaps,
+                                        &font_encodings,
+                                        &encoding_cache,
+                                        probe_decisions
+                                            .get_or_insert_with(|| cmap_decisions.clone()),
+                                        &font_widths,
+                                        &font_kinds,
+                                    )
+                                },
+                            )
                         };
                         let baseline_horizontal = {
                             let combined = multiply_matrices(&text_matrix, &ctm);
@@ -1251,6 +1276,11 @@ pub(crate) fn extract_page_text_items_with_options(
                         // the page until the pen is past the mark again (see
                         // `PenHighWater`).
                         let mut pen_high_water = PenHighWater::new();
+                        // The character (and word) spacing after the last
+                        // glyph shown, in thousandths of the font size: the
+                        // gap a `TJ` offset opens on the page is the offset
+                        // plus this spacing (see `spacing_after_string`).
+                        let mut spacing_before_offset = 0.0f32;
                         // The array's last string, when it is a wide-spaced
                         // boundary string, and the sub-run text before it.
                         let mut deferred_word_gaps: Option<(String, WordGapCandidate)> = None;
@@ -1274,6 +1304,13 @@ pub(crate) fn extract_page_text_items_with_options(
                                         total_width_ts + displacement,
                                         current_font_size,
                                     );
+                                    // The gap the offset opens between the glyphs, with
+                                    // the spacing after the glyph before it in an array
+                                    // that takes its spacing back: a word gap when wide
+                                    // enough. Column positioning is the offset's alone;
+                                    // the spacing justifies within the line.
+                                    let judged_gap =
+                                        judged - std::mem::take(&mut spacing_before_offset);
                                     // A true backtrack puts the pen behind the
                                     // current segment's start — plain positive
                                     // kerning never does.
@@ -1301,7 +1338,7 @@ pub(crate) fn extract_page_text_items_with_options(
                                     } else {
                                         total_width_ts += displacement;
                                         if !is_invisible
-                                            && judged < -word_gap
+                                            && judged_gap < -word_gap
                                             && !current_text.is_empty()
                                             && !current_text.ends_with(' ')
                                         {
@@ -1323,6 +1360,13 @@ pub(crate) fn extract_page_text_items_with_options(
                                         total_width_ts + displacement,
                                         current_font_size,
                                     );
+                                    // The gap the offset opens between the glyphs, with
+                                    // the spacing after the glyph before it in an array
+                                    // that takes its spacing back: a word gap when wide
+                                    // enough. Column positioning is the offset's alone;
+                                    // the spacing justifies within the line.
+                                    let judged_gap =
+                                        judged - std::mem::take(&mut spacing_before_offset);
                                     // A true backtrack puts the pen behind the
                                     // current segment's start — plain positive
                                     // kerning never does.
@@ -1349,7 +1393,7 @@ pub(crate) fn extract_page_text_items_with_options(
                                     } else {
                                         total_width_ts += displacement;
                                         if !is_invisible
-                                            && judged < -word_gap
+                                            && judged_gap < -word_gap
                                             && !current_text.is_empty()
                                             && !current_text.ends_with(' ')
                                         {
@@ -1425,6 +1469,13 @@ pub(crate) fn extract_page_text_items_with_options(
                             {
                                 pen_high_water
                                     .painted(total_width_ts, is_dependent_sign(raw, font_info));
+                                spacing_before_offset = spacing_after_string(
+                                    raw,
+                                    font_info,
+                                    current_font_size,
+                                    gap_char_spacing,
+                                    gap_word_spacing,
+                                );
                             }
                             if suppress_glyph_extraction {
                                 actual_text_glyph_count += element_glyphs;
@@ -1539,11 +1590,19 @@ pub(crate) fn extract_page_text_items_with_options(
                             }
                         }
                         // Flush remaining text
+                        // In an array that takes its spacing back, the spacing after the
+                        // last glyph is a word gap still to come, not part of the run's
+                        // box: the next run's start shows it (see `spacing_after_string`).
+                        let trailing_gap_ts = spacing_before_offset / 1000.0 * current_font_size;
                         if !is_invisible && !current_text.trim().is_empty() {
                             sub_items.push((
                                 current_text,
                                 sub_start_width_ts,
-                                total_width_ts,
+                                if trailing_gap_ts > 0.0 {
+                                    (total_width_ts - trailing_gap_ts).max(sub_start_width_ts)
+                                } else {
+                                    total_width_ts
+                                },
                                 current_estimate_ts,
                                 current_symbol_rewrite,
                             ));
@@ -5243,6 +5302,38 @@ BT /F1 10 Tf 300 30 Td (7) Tj ET";
             let texts: Vec<_> = items.iter().map(|i| i.text.as_str()).collect();
             assert_eq!(texts, [expected], "{content}");
         }
+    }
+
+    /// Murri et al. 2013 (BMC Medicine, Arbortext): a tight justified line
+    /// is set with a word-sized `Tc` (0.258 em at `1 Tf`) that a `+258`
+    /// offset takes back inside each word, so only the word gaps keep it:
+    /// `(d) -7 (D)` is a 0.265 em gap on the page, `(A) 7 (w)` 0.251 em.
+    /// Judged without the spacing the offsets were near zero and the line
+    /// read "extractedDNAwassubjected".
+    #[test]
+    fn tj_offsets_are_judged_with_the_character_spacing_before_them() {
+        let items = extract_simple_items(
+            b"BT /F1 1 Tf 9.76 0 0 9.76 72 700 Tm 0.258 Tc \
+              [(w) 258 (i) 258 (t) 258 (h) -7 (D) 273 (N) 258 (A) 7 (w) 258 (a) 275 (s) -7 (s) 258 (o)] TJ ET",
+        );
+        let texts: Vec<_> = items.iter().map(|i| i.text.as_str()).collect();
+        assert_eq!(texts.concat(), "with DNA was so");
+    }
+
+    /// The same offsets without character spacing stay letter kerns, and a
+    /// tracked run whose spacing nothing takes back keeps its letters.
+    #[test]
+    fn tj_offsets_without_character_spacing_are_judged_as_before() {
+        let items = extract_simple_items(
+            b"BT /F1 1 Tf 9.76 0 0 9.76 72 700 Tm [(wi) -7 (th) 7 (DNA)] TJ ET",
+        );
+        let texts: Vec<_> = items.iter().map(|i| i.text.as_str()).collect();
+        assert_eq!(texts.concat(), "withDNA");
+        let items = extract_simple_items(
+            b"BT /F1 1 Tf 9.76 0 0 9.76 72 700 Tm 0.05 Tc [(W) -7 (O) 7 (R) -7 (D)] TJ ET",
+        );
+        let texts: Vec<_> = items.iter().map(|i| i.text.as_str()).collect();
+        assert_eq!(texts.concat(), "WORD");
     }
 
     /// A space run wide enough to be seen as a gap (0.6 em here) is left to

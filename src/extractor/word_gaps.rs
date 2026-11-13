@@ -126,6 +126,63 @@ fn spacing_after(code: &[u8], char_spacing: f32, word_spacing: f32) -> f32 {
         }
 }
 
+/// The spacing the pen adds after the last glyph of `raw`, shown with
+/// `char_spacing` and `word_spacing` at `font_size`, in thousandths of the
+/// font size: the part of the gap after the string that no `TJ` offset
+/// writes. In an array that takes its spacing back (see
+/// [`array_takes_spacing_back`]) a `TJ` offset is judged with it, since the
+/// gap it opens on the page is the offset plus this spacing. Producers that justify a tight
+/// line with a word-sized `Tc` take it back with a positive offset inside
+/// each word and leave it standing at the word gaps (Arbortext:
+/// `0.258 Tc [(d) -7 (D) 273 (N)]`); judged alone, those offsets are kerns
+/// and the words run together. Zero at a negative or zero `Tf` size, where
+/// offsets read backwards.
+pub(crate) fn spacing_after_string(
+    raw: &[u8],
+    font_info: Option<&FontWidthInfo>,
+    font_size: f32,
+    char_spacing: f32,
+    word_spacing: f32,
+) -> f32 {
+    let code_len = if font_info.is_some_and(|font_info| font_info.is_cid) {
+        2
+    } else {
+        1
+    };
+    if font_size <= 0.0 || raw.len() < code_len {
+        return 0.0;
+    }
+    let last = &raw[raw.len() - code_len..];
+    spacing_after(last, char_spacing, word_spacing) / font_size * 1000.0
+}
+
+/// Whether `array` takes its character spacing back: some string is followed
+/// directly by a positive offset that takes the spacing after its last glyph
+/// back (see [`offset_takes_spacing_back`]). Such an array writes its word
+/// gaps as the spacing left standing, so its offsets are judged with the
+/// spacing before them (see [`spacing_after_string`]); spacing nothing
+/// takes back is tracking, and offsets are judged as they stand.
+pub(crate) fn array_takes_spacing_back(
+    array: &[Object],
+    font_info: Option<&FontWidthInfo>,
+    font_size: f32,
+    char_spacing: f32,
+    word_spacing: f32,
+) -> bool {
+    if font_size <= 0.0 || (char_spacing == 0.0 && word_spacing == 0.0) {
+        return false;
+    }
+    array.windows(2).any(|pair| {
+        get_operand_bytes(&pair[0]).is_some_and(|raw| {
+            let spacing_ts =
+                spacing_after_string(raw, font_info, font_size, char_spacing, word_spacing)
+                    / 1000.0
+                    * font_size;
+            offset_takes_spacing_back(&pair[1], spacing_ts, font_size)
+        })
+    })
+}
+
 /// Whether a word-gap junction between two glyphs takes a space: not next
 /// to a space glyph, not inside Han/Kana text, which never spaces between
 /// glyphs, not inside a right-to-left run, whose order and spacing the RTL
@@ -518,6 +575,9 @@ pub(crate) fn tj_tracking(
     array: &[Object],
     font_info: Option<&FontWidthInfo>,
     space_threshold: f32,
+    font_size: f32,
+    char_spacing: f32,
+    word_spacing: f32,
     mut decode: impl FnMut(&Object) -> Option<(String, bool)>,
 ) -> Option<f32> {
     /// An element of the array as the reader walks it: an offset, or a
@@ -582,7 +642,9 @@ pub(crate) fn tj_tracking(
     }
 
     // Junction gaps between consecutive glyph strings, positive when the
-    // offset widens the gap (a negative `TJ` number moves the pen on).
+    // offset widens the gap (a negative `TJ` number moves the pen on), with
+    // the spacing after the glyph before the junction, as the walkers judge
+    // the offsets (see `spacing_after_string`).
     let mut gaps: Vec<f32> = Vec::new();
     let mut strings: Vec<&Object> = Vec::new();
     let mut pending = 0.0f32;
@@ -605,7 +667,7 @@ pub(crate) fn tj_tracking(
             }
             gaps.push(pending);
         }
-        pending = 0.0;
+        pending = spacing_after_string(raw, font_info, font_size, char_spacing, word_spacing);
         numbers_since_string = 0;
         strings.push(object);
     }
@@ -1085,6 +1147,9 @@ mod tests {
             &tj(spec),
             Some(&font),
             word_gap_threshold(Some(&font)),
+            1.0,
+            0.0,
+            0.0,
             latin,
         )
     }
@@ -1161,6 +1226,9 @@ mod tests {
                 &tj("(A) -300 (B) -300 (A)"),
                 Some(&font),
                 word_gap_threshold(Some(&font)),
+                1.0,
+                0.0,
+                0.0,
                 han
             ),
             Some(300.0)
@@ -1176,6 +1244,9 @@ mod tests {
                 &tj("(U) -300 (S) -300 (A)"),
                 Some(&font),
                 word_gap_threshold(Some(&font)),
+                1.0,
+                0.0,
+                0.0,
                 partial
             ),
             None
@@ -1200,7 +1271,8 @@ mod tests {
         wide.space_width = 600;
         let threshold = word_gap_threshold(Some(&wide));
         assert_eq!(threshold, 240.0);
-        let read = |spec: &str| tj_tracking(&tj(spec), Some(&wide), threshold, latin);
+        let read =
+            |spec: &str| tj_tracking(&tj(spec), Some(&wide), threshold, 1.0, 0.0, 0.0, latin);
         assert_eq!(read("(a) -278 (<) -278 (b)"), None);
         assert_eq!(read("(a) -200 (b) -200 (c) -200 (d)"), None);
         assert_eq!(read("(A) -600 (B) -600 (C) -600 (D)"), None);
@@ -1224,7 +1296,8 @@ mod tests {
         narrow.space_width = 250;
         let threshold = word_gap_threshold(Some(&narrow));
         assert_eq!(threshold, 100.0);
-        let read = |spec: &str| tj_tracking(&tj(spec), Some(&narrow), threshold, latin);
+        let read =
+            |spec: &str| tj_tracking(&tj(spec), Some(&narrow), threshold, 1.0, 0.0, 0.0, latin);
         assert_eq!(
             read("(C) -389 (E) -389 (N) -389 (T) -389 (E) -389 (R)"),
             Some(389.0)
@@ -1299,7 +1372,7 @@ mod tests {
             glyph(0x43),
         ];
         assert_eq!(
-            tj_tracking(&array, Some(&cid), threshold, latin),
+            tj_tracking(&array, Some(&cid), threshold, 1.0, 0.0, 0.0, latin),
             Some(250.0)
         );
         // Two glyphs in one string: a word, not a tracked run.
@@ -1311,7 +1384,10 @@ mod tests {
             Object::Integer(-250),
             glyph(0x44),
         ];
-        assert_eq!(tj_tracking(&array, Some(&cid), threshold, latin), None);
+        assert_eq!(
+            tj_tracking(&array, Some(&cid), threshold, 1.0, 0.0, 0.0, latin),
+            None
+        );
     }
 
     #[test]
@@ -1393,7 +1469,8 @@ mod tests {
         // width table leaves out.
         let font = font_with_sign();
         let threshold = word_gap_threshold(Some(&font));
-        let tracking_with_sign = |spec: &str| tj_tracking(&tj(spec), Some(&font), threshold, latin);
+        let tracking_with_sign =
+            |spec: &str| tj_tracking(&tj(spec), Some(&font), threshold, 1.0, 0.0, 0.0, latin);
         assert_eq!(
             tracking_with_sign("(V) -250 (A) 200 (^) -450 (L) -250 (L) -250 (E) -250 (Y)"),
             Some(250.0)
@@ -1424,7 +1501,8 @@ mod tests {
         // before the sign and one after.
         let font = font_with_sign();
         let threshold = word_gap_threshold(Some(&font));
-        let tracking_with_sign = |spec: &str| tj_tracking(&tj(spec), Some(&font), threshold, latin);
+        let tracking_with_sign =
+            |spec: &str| tj_tracking(&tj(spec), Some(&font), threshold, 1.0, 0.0, 0.0, latin);
         assert_eq!(
             tracking_with_sign("(V) -250 (A) -100 -150 (^) (L) -250 (L) -250 (E) -250 (Y)"),
             None

@@ -19,9 +19,9 @@ use super::geometry::{
     scaled_run_geometry,
 };
 use super::word_gaps::{
-    column_gap_threshold, is_dependent_sign, offset_takes_spacing_back, tj_gap_thresholds,
-    tj_tracking, word_gap_candidate, word_gap_threshold, PenHighWater, PendingWordGaps,
-    WordGapCandidate,
+    array_takes_spacing_back, column_gap_threshold, is_dependent_sign, offset_takes_spacing_back,
+    spacing_after_string, tj_gap_thresholds, tj_tracking, word_gap_candidate, word_gap_threshold,
+    PenHighWater, PendingWordGaps, WordGapCandidate,
 };
 use super::{get_number, image_bbox_from_ctm, multiply_matrices};
 
@@ -1032,6 +1032,22 @@ fn extract_form_xobject_text_inner(
                         // Word-space threshold for `TJ` offsets and character
                         // spacing alike, from the font metrics when available.
                         let space_threshold = word_gap_threshold(font_info);
+                        // Character and word spacing count toward the gaps
+                        // the offsets open only where the array takes its
+                        // spacing back inside words (see
+                        // `array_takes_spacing_back`); elsewhere it is
+                        // tracking and the offsets are judged alone.
+                        let (gap_char_spacing, gap_word_spacing) = if array_takes_spacing_back(
+                            array,
+                            font_info,
+                            current_font_size,
+                            char_spacing,
+                            word_spacing,
+                        ) {
+                            (char_spacing, word_spacing)
+                        } else {
+                            (0.0, 0.0)
+                        };
                         // A tracked display run is judged over its own
                         // tracking, as on the page (see `tj_tracking` and
                         // `tj_gap_thresholds`); a hidden run is not read
@@ -1042,21 +1058,30 @@ fn extract_form_xobject_text_inner(
                             None
                         } else {
                             let mut probe_decisions: Option<CMapDecisionCache> = None;
-                            tj_tracking(array, font_info, space_threshold, |element| {
-                                extract_text_from_operand(
-                                    element,
-                                    &current_font,
-                                    font_base_names.get(&current_font).map(|s| s.as_str()),
-                                    font_cmaps,
-                                    &font_tounicode_refs,
-                                    &inline_cmaps,
-                                    &font_encodings,
-                                    &encoding_cache,
-                                    probe_decisions.get_or_insert_with(|| cmap_decisions.clone()),
-                                    &font_widths,
-                                    &font_kinds,
-                                )
-                            })
+                            tj_tracking(
+                                array,
+                                font_info,
+                                space_threshold,
+                                current_font_size,
+                                gap_char_spacing,
+                                gap_word_spacing,
+                                |element| {
+                                    extract_text_from_operand(
+                                        element,
+                                        &current_font,
+                                        font_base_names.get(&current_font).map(|s| s.as_str()),
+                                        font_cmaps,
+                                        &font_tounicode_refs,
+                                        &inline_cmaps,
+                                        &font_encodings,
+                                        &encoding_cache,
+                                        probe_decisions
+                                            .get_or_insert_with(|| cmap_decisions.clone()),
+                                        &font_widths,
+                                        &font_kinds,
+                                    )
+                                },
+                            )
                         };
                         let baseline_horizontal = {
                             let combined = multiply_matrices(&text_matrix, &ctm);
@@ -1090,6 +1115,11 @@ fn extract_form_xobject_text_inner(
                         // the page until the pen is past the mark again (see
                         // `PenHighWater`).
                         let mut pen_high_water = PenHighWater::new();
+                        // The character (and word) spacing after the last
+                        // glyph shown, in thousandths of the font size: the
+                        // gap a `TJ` offset opens on the page is the offset
+                        // plus this spacing (see `spacing_after_string`).
+                        let mut spacing_before_offset = 0.0f32;
                         // The array's last string, when it is a wide-spaced
                         // boundary string, and the sub-run text before it.
                         let mut deferred_word_gaps: Option<(String, WordGapCandidate)> = None;
@@ -1113,6 +1143,13 @@ fn extract_form_xobject_text_inner(
                                         total_width_ts + displacement,
                                         current_font_size,
                                     );
+                                    // The gap the offset opens between the glyphs, with
+                                    // the spacing after the glyph before it in an array
+                                    // that takes its spacing back: a word gap when wide
+                                    // enough. Column positioning is the offset's alone;
+                                    // the spacing justifies within the line.
+                                    let judged_gap =
+                                        judged - std::mem::take(&mut spacing_before_offset);
                                     // A true backtrack puts the pen behind the
                                     // current segment's start — plain positive
                                     // kerning never does.
@@ -1136,7 +1173,7 @@ fn extract_form_xobject_text_inner(
                                     } else {
                                         total_width_ts += displacement;
                                         if !hidden
-                                            && judged < -word_gap
+                                            && judged_gap < -word_gap
                                             && !current_text.is_empty()
                                             && !current_text.ends_with(' ')
                                         {
@@ -1158,6 +1195,13 @@ fn extract_form_xobject_text_inner(
                                         total_width_ts + displacement,
                                         current_font_size,
                                     );
+                                    // The gap the offset opens between the glyphs, with
+                                    // the spacing after the glyph before it in an array
+                                    // that takes its spacing back: a word gap when wide
+                                    // enough. Column positioning is the offset's alone;
+                                    // the spacing justifies within the line.
+                                    let judged_gap =
+                                        judged - std::mem::take(&mut spacing_before_offset);
                                     // A true backtrack puts the pen behind the
                                     // current segment's start — plain positive
                                     // kerning never does.
@@ -1181,7 +1225,7 @@ fn extract_form_xobject_text_inner(
                                     } else {
                                         total_width_ts += displacement;
                                         if !hidden
-                                            && judged < -word_gap
+                                            && judged_gap < -word_gap
                                             && !current_text.is_empty()
                                             && !current_text.ends_with(' ')
                                         {
@@ -1238,6 +1282,13 @@ fn extract_form_xobject_text_inner(
                             {
                                 pen_high_water
                                     .painted(total_width_ts, is_dependent_sign(raw, font_info));
+                                spacing_before_offset = spacing_after_string(
+                                    raw,
+                                    font_info,
+                                    current_font_size,
+                                    gap_char_spacing,
+                                    gap_word_spacing,
+                                );
                             }
                             if !hidden {
                                 if let Some((text, legacy_symbol_rewrite)) =
@@ -1315,11 +1366,19 @@ fn extract_form_xobject_text_inner(
                                 }
                             }
                         }
+                        // In an array that takes its spacing back, the spacing after the
+                        // last glyph is a word gap still to come, not part of the run's
+                        // box: the next run's start shows it (see `spacing_after_string`).
+                        let trailing_gap_ts = spacing_before_offset / 1000.0 * current_font_size;
                         if !hidden && !current_text.trim().is_empty() {
                             sub_items.push((
                                 current_text,
                                 sub_start_width_ts,
-                                total_width_ts,
+                                if trailing_gap_ts > 0.0 {
+                                    (total_width_ts - trailing_gap_ts).max(sub_start_width_ts)
+                                } else {
+                                    total_width_ts
+                                },
                                 current_estimate_ts,
                                 current_symbol_rewrite,
                             ));
