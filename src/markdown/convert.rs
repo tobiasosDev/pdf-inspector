@@ -4,7 +4,8 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
 use crate::structure_tree::StructRole;
-use crate::types::TextLine;
+use crate::text_utils::effective_width;
+use crate::types::{TextItem, TextLine};
 
 use super::analysis::{
     bold_heading_level, calculate_font_stats, compute_heading_tiers, compute_paragraph_threshold,
@@ -13,7 +14,7 @@ use super::analysis::{
 };
 use super::classify::{format_list_item, is_caption_line, is_list_item, starts_with_bullet_marker};
 use super::heading::classify_heading_sequences;
-use super::postprocess::clean_markdown;
+use super::postprocess::{clean_markdown, LINE_END_HYPHEN_GAP};
 use super::preprocess::{merge_drop_caps, merge_heading_lines};
 use super::{item_is_in_chart_region, MarkdownOptions, CHART_SEPARATOR_PAD};
 
@@ -747,6 +748,52 @@ fn flush_page_tables_and_images(
 }
 
 /// Convert text lines to markdown, inserting tables and images at appropriate Y positions
+/// Where the last stretch of `line` starts: its last item, extended left over
+/// gaps up to an em. A line that spans two columns (an interleaved page)
+/// starts its last stretch in the right one, past the gutter.
+fn last_stretch_x(line: &TextLine) -> f32 {
+    let mut items: Vec<&TextItem> = line.items.iter().collect();
+    items.sort_by(|a, b| a.x.total_cmp(&b.x));
+    let Some(mut start) = items.last().map(|item| item.x) else {
+        return 0.0;
+    };
+    for pair in items.windows(2).rev() {
+        let gap = pair[1].x - (pair[0].x + effective_width(pair[0]));
+        if gap > pair[0].font_size.max(pair[1].font_size).max(1.0) {
+            break;
+        }
+        start = pair[0].x;
+    }
+    start
+}
+
+/// The gap that joins the next line of a paragraph to the text so far: the
+/// line-end hyphen marker when the paragraph so far ends in a hyphen after a
+/// letter and the next line starts in lowercase where the previous line's
+/// last stretch started (`last_stretch_x`, within two ems for a first-line
+/// indent). That is a hyphen at a line end in one column, and the
+/// hyphenation pass may join it without vocabulary evidence. Anything else,
+/// a wrap from one column into the other included, is joined by a plain
+/// space.
+fn paragraph_line_gap(
+    output: &str,
+    next: &str,
+    prev_stretch_x: f32,
+    line_x: f32,
+    base_size: f32,
+) -> char {
+    let mut tail = output.chars().rev();
+    let hyphen_after_letter =
+        tail.next() == Some('-') && tail.next().is_some_and(char::is_alphabetic);
+    let lowercase_next = next.chars().next().is_some_and(char::is_lowercase);
+    let same_column = (prev_stretch_x - line_x).abs() <= base_size.max(1.0) * 2.0;
+    if hyphen_after_letter && lowercase_next && same_column {
+        LINE_END_HYPHEN_GAP
+    } else {
+        ' '
+    }
+}
+
 pub(super) fn to_markdown_from_lines_with_tables_and_images(
     lines: Vec<TextLine>,
     options: MarkdownOptions,
@@ -838,6 +885,7 @@ pub(super) fn to_markdown_from_lines_with_tables_and_images(
     let mut current_page = 0u32;
     let mut prev_y = f32::MAX;
     let mut prev_x = 0.0f32;
+    let mut prev_stretch_x = 0.0f32;
     let mut in_list = false;
     let mut in_paragraph = false;
     let mut last_list_x: Option<f32> = None;
@@ -1015,6 +1063,8 @@ pub(super) fn to_markdown_from_lines_with_tables_and_images(
         let (prior_y, prior_x) = (prev_y, prev_x);
         prev_y = line.y;
         prev_x = line_x;
+        let prior_stretch_x = prev_stretch_x;
+        prev_stretch_x = last_stretch_x(line);
 
         // Get text with optional bold/italic formatting
         let text = line.text_with_formatting(
@@ -1066,6 +1116,7 @@ pub(super) fn to_markdown_from_lines_with_tables_and_images(
             // band from the text line, not from the tail.
             prev_y = prior_y;
             prev_x = prior_x;
+            prev_stretch_x = prior_stretch_x;
             continue;
         }
 
@@ -1318,7 +1369,13 @@ pub(super) fn to_markdown_from_lines_with_tables_and_images(
             if cur_dot_leaders || prev_had_dot_leaders {
                 output.push('\n');
             } else {
-                output.push(' ');
+                output.push(paragraph_line_gap(
+                    &output,
+                    trimmed,
+                    prior_stretch_x,
+                    line_x,
+                    base_size,
+                ));
             }
         }
         output.push_str(trimmed);
@@ -1474,6 +1531,8 @@ pub fn to_markdown_from_lines(lines: Vec<TextLine>, options: MarkdownOptions) ->
     let mut output = String::new();
     let mut current_page = 0u32;
     let mut prev_y = f32::MAX;
+    let mut prev_x = 0.0f32;
+    let mut prev_stretch_x = 0.0f32;
     let mut in_list = false;
     let mut in_paragraph = false;
     let mut last_list_x: Option<f32> = None;
@@ -1493,6 +1552,7 @@ pub fn to_markdown_from_lines(lines: Vec<TextLine>, options: MarkdownOptions) ->
             }
             current_page = line.page;
             prev_y = f32::MAX;
+            prev_x = 0.0;
             in_list = false;
             last_list_x = None;
             prev_had_dot_leaders = false;
@@ -1524,6 +1584,11 @@ pub fn to_markdown_from_lines(lines: Vec<TextLine>, options: MarkdownOptions) ->
         // Let the continuation check below decide if we're still in a list
         let prior_y = prev_y;
         prev_y = line.y;
+        let line_x = line.items.first().map(|i| i.x).unwrap_or(0.0);
+        let prior_x = prev_x;
+        prev_x = line_x;
+        let prior_stretch_x = prev_stretch_x;
+        prev_stretch_x = last_stretch_x(line);
 
         // Get text with optional bold/italic formatting
         let text = line.text_with_formatting(
@@ -1555,6 +1620,8 @@ pub fn to_markdown_from_lines(lines: Vec<TextLine>, options: MarkdownOptions) ->
             // a monospace run is code for the block detection further down.
             // The next line measures its gap from the text line, not the tail.
             prev_y = prior_y;
+            prev_x = prior_x;
+            prev_stretch_x = prior_stretch_x;
             continue;
         }
 
@@ -1696,7 +1763,13 @@ pub fn to_markdown_from_lines(lines: Vec<TextLine>, options: MarkdownOptions) ->
             if cur_dot_leaders || prev_had_dot_leaders {
                 output.push('\n');
             } else {
-                output.push(' ');
+                output.push(paragraph_line_gap(
+                    &output,
+                    trimmed,
+                    prior_stretch_x,
+                    line_x,
+                    base_size,
+                ));
             }
         }
         output.push_str(trimmed);
