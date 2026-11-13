@@ -499,14 +499,38 @@ impl ProseLineStats {
     /// leading; a full line resuming after a figure-sized vertical gap
     /// starts a new run rather than extending the previous one.
     const MAX_LEADING_FACTOR: f32 = 2.5;
+    /// A gap up to this many ems is a word space, even a justified one.
+    const WORD_GAP_EM: f32 = 1.0;
+
+    /// The runs on one line: items left to right, joined while the gap to
+    /// the next is word-sized. Justifying typesetters (3B2, Arbortext) emit
+    /// every word as its own item, so a prose line held four or more items
+    /// and read as a table row; table cells sit further apart than a word
+    /// space. Marker runs ride on a line, they are not table-like items.
+    fn runs_on_line(line_items: &[&TextItem]) -> usize {
+        let mut words: Vec<&TextItem> = line_items
+            .iter()
+            .copied()
+            .filter(|i| !i.is_script())
+            .collect();
+        words.sort_by(|a, b| a.x.total_cmp(&b.x));
+        let mut runs = usize::from(!words.is_empty());
+        for pair in words.windows(2) {
+            let gap = pair[1].x - (pair[0].x + effective_width(pair[0]));
+            let em = pair[0].font_size.max(pair[1].font_size);
+            if gap.is_nan() || gap > em * Self::WORD_GAP_EM {
+                runs += 1;
+            }
+        }
+        runs
+    }
 
     fn flush_line(&mut self, line_items: &[&TextItem], col: &ColumnRegion, col_width: f32) {
         if line_items.is_empty() {
             return;
         }
         self.total_lines += 1;
-        // Marker runs ride on a line, they are not table-like items.
-        self.total_items += line_items.iter().filter(|i| !i.is_script()).count();
+        self.total_items += Self::runs_on_line(line_items);
 
         let line_y = line_items[0].line_y();
         let line_height = line_items
@@ -3531,6 +3555,50 @@ mod tests {
             // Short fragments below, keeping total lines high and the
             // global full-line ratio (6/18) under the 40% bar.
             items.push(make_item(1, 60.0, 150.0 - line as f32 * 12.0, "box"));
+        }
+        let column = ColumnRegion {
+            x_min: 0.0,
+            x_max: 250.0,
+        };
+        let refs: Vec<&TextItem> = items.iter().collect();
+        assert!(!columns_have_prose(&[column], &refs));
+    }
+
+    /// One line of a column set word by word, as justified typesetters
+    /// (3B2, Arbortext) emit it: `words` items `gap` points apart.
+    fn word_line(items: &mut Vec<TextItem>, y: f32, words: usize, gap: f32) {
+        let mut x = 10.0;
+        for _ in 0..words {
+            let word = make_item(1, x, y, "mmmmm");
+            x += word.width + gap;
+            items.push(word);
+        }
+    }
+
+    #[test]
+    fn prose_gate_accepts_justified_prose_set_word_by_word() {
+        // Sukhera 2022 (JGME, 3B2): every justified line is one item per
+        // word, word gaps ~0.65 em, so a prose column averages ~4 items per
+        // line. Word-sized gaps join one run; the column is prose.
+        let mut items: Vec<TextItem> = Vec::new();
+        for line in 0..20 {
+            word_line(&mut items, 700.0 - line as f32 * 12.0, 6, 8.0);
+        }
+        let column = ColumnRegion {
+            x_min: 0.0,
+            x_max: 250.0,
+        };
+        let refs: Vec<&TextItem> = items.iter().collect();
+        assert!(columns_have_prose(&[column], &refs));
+    }
+
+    #[test]
+    fn prose_gate_still_rejects_full_width_table_rows() {
+        // The same row width as a table: five cells per row, two em apart.
+        // Cells are not words; the per-line item count still rejects it.
+        let mut items: Vec<TextItem> = Vec::new();
+        for line in 0..20 {
+            word_line(&mut items, 700.0 - line as f32 * 12.0, 5, 24.0);
         }
         let column = ColumnRegion {
             x_min: 0.0,
