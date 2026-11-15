@@ -626,6 +626,15 @@ pub(crate) fn expand_ligatures(text: &str) -> String {
     result
 }
 
+/// Keep explicit discretionary-hyphen evidence until lines have been assembled.
+/// Glyph-name comparisons can still use `expand_ligatures` to ignore it.
+pub(crate) fn expand_ligatures_for_layout(text: &str) -> String {
+    text.split('\u{00ad}')
+        .map(expand_ligatures)
+        .collect::<Vec<_>>()
+        .join("\u{00ad}")
+}
+
 /// A decoded show-op string qualifies as evidence in the geometric
 /// visual-order vote when it holds an RTL letter. The vote reads the way
 /// show operators walk along the line, which tells the two conventions

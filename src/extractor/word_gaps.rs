@@ -28,7 +28,7 @@ use lopdf::{Object, StringFormat};
 
 use super::fonts::get_operand_bytes;
 use super::{get_number, is_spaceless_cjk, multiply_matrices};
-use crate::text_utils::{expand_ligatures, is_rtl_char};
+use crate::text_utils::{expand_ligatures_for_layout, is_rtl_char};
 use crate::types::{FontWidthInfo, TextItem};
 
 /// Glyphs in the longest string that carries word gaps this way: the last
@@ -364,7 +364,7 @@ impl PendingWordGaps {
         )?;
         Some(Self::new(
             item,
-            expand_ligatures(&candidate.spaced_text),
+            expand_ligatures_for_layout(&candidate.spaced_text),
             pen_tm,
             ctm,
             horizontal_scale,

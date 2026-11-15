@@ -772,7 +772,7 @@ fn last_stretch_x(line: &TextLine) -> f32 {
 /// letter and the next line starts in lowercase where the previous line's
 /// last stretch started (`last_stretch_x`, within two ems for a first-line
 /// indent). That is a hyphen at a line end in one column, and the
-/// hyphenation pass may join it without vocabulary evidence. Anything else,
+/// hyphenation pass still needs spelling evidence to remove a hard hyphen. Anything else,
 /// a wrap from one column into the other included, is joined by a plain
 /// space.
 fn paragraph_line_gap(
@@ -783,8 +783,8 @@ fn paragraph_line_gap(
     base_size: f32,
 ) -> char {
     let mut tail = output.chars().rev();
-    let hyphen_after_letter =
-        tail.next() == Some('-') && tail.next().is_some_and(char::is_alphabetic);
+    let hyphen_after_letter = tail.next().is_some_and(|c| matches!(c, '-' | '\u{00ad}'))
+        && tail.next().is_some_and(char::is_alphabetic);
     let lowercase_next = next.chars().next().is_some_and(char::is_lowercase);
     let same_column = (prev_stretch_x - line_x).abs() <= base_size.max(1.0) * 2.0;
     if hyphen_after_letter && lowercase_next && same_column {

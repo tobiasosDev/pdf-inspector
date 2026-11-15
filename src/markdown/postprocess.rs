@@ -7,8 +7,8 @@ use crate::text_utils::is_page_number_line;
 
 /// Stands in for the space after a hyphen that the layout proved to end a
 /// line, with the next line of the same column going on in lowercase
-/// (`convert`). The hyphenation pass may join such a break with independent
-/// lexical evidence; every other pass sees a plain space. A Unicode
+/// (`convert`). The hyphenation pass may join such a break with document or lexical
+/// spelling evidence; every other pass sees a plain space. A Unicode
 /// noncharacter, so no PDF text can carry it.
 pub(crate) const LINE_END_HYPHEN_GAP: char = '\u{FDD0}';
 
@@ -31,6 +31,9 @@ pub(crate) fn clean_markdown(mut text: String, options: &MarkdownOptions) -> Str
     if text.contains(LINE_END_HYPHEN_GAP) {
         text = text.replace(LINE_END_HYPHEN_GAP, " ");
     }
+
+    // Discretionary glyphs not at a proven wrap have no printed content.
+    text = text.replace('\u{00ad}', "");
 
     // Remove standalone page numbers
     if options.remove_page_numbers {
@@ -225,10 +228,11 @@ fn join_decision(a: &str, b: &str, proven: bool, vocabulary: &Vocabulary) -> Joi
     }
     let key_plain = format!("{}{}", a.to_lowercase(), b.to_lowercase());
     let key_hyphen = format!("{}-{}", a.to_lowercase(), b.to_lowercase());
-    if words.contains(&key_plain) {
+    if hyphenated.contains(&key_hyphen) {
+        Join::Hyphen
+    } else if words.contains(&key_plain) {
         Join::Plain
-    } else if hyphenated.contains(&key_hyphen)
-        || b.chars().next().is_some_and(|c| c.is_uppercase())
+    } else if b.chars().next().is_some_and(|c| c.is_uppercase())
         || (proven
             && a.chars().count() >= 2
             && a.chars().all(|c| c.is_uppercase())
@@ -254,8 +258,11 @@ fn join_decision(a: &str, b: &str, proven: bool, vocabulary: &Vocabulary) -> Joi
         Join::Hyphen
     } else if proven && lexical_word(&key_plain) && !lexical_compound(&key_hyphen) {
         // Same-column layout establishes adjacency, not a discretionary hyphen.
-        // An independent lexicon may establish a whole word absent from a
-        // short document; unlisted/ambiguous compounds keep their hard hyphen.
+        // Policy fallback: a lexicon supplies a closed spelling absent from a
+        // short document. Accepted limitation: unwitnessed re-pair/re-fuse/
+        // re-sent join to repair/refuse/resent. Listed re-cover/re-sign/re-form
+        // retain their hyphen: the outcome depends on the lexical entries. A dictionary
+        // cannot disambiguate these rare coinages; document witnesses win.
         Join::Plain
     } else {
         // No evidence at all: leave the break as it is. An unconditional join
@@ -268,50 +275,28 @@ fn join_decision(a: &str, b: &str, proven: bool, vocabulary: &Vocabulary) -> Joi
     }
 }
 
-/// Rejoin words hyphenated at the original line breaks.
-///
-/// Justified print breaks words at syllables; after paragraph lines are
-/// joined with spaces those breaks survive as "de- fendant" (and, when an
-/// emphasis span was split with the word, "Bap-** **tist"). Whether the
-/// hyphen itself belongs in the word cannot be decided locally — "de-
-/// fendant" is one word but "Third- Party" is a hyphenated compound — so the
-/// document is its own dictionary:
-///
-///   1. fragments appear elsewhere joined plain ("defendant") — join plain;
-///   2. appear elsewhere hyphenated ("six-month"), or the continuation is
-///      capitalized ("Hinds- Radix", "Third- Party") — keep the hyphen;
-///   3. both fragments are words the document uses and the continuation
-///      has four or more letters ("commercial- type" where "commercial"
-///      and "type" appear elsewhere) — a compound, keep the hyphen. The
-///      length floor keeps this rule off suspended hyphens ("mid- and
-///      long-term", "klein- und mittelgroß"): conjunctions are one to
-///      three letters in essentially every language, so no conjunction
-///      list is needed;
-///   4. a layout-proven break with an independently attested whole word
-///      (and no attested hyphenated alternative) may join;
-///   5. no evidence — leave the break untouched. Evidence covers ~99% of
-///      breaks on vocabulary-rich documents, and an unconditional join was
-///      the one rule able to corrupt output (fusing interleaved-column
-///      fragments into unrecoverable tokens).
-///
-/// Whole words come from document evidence or the embedded independent
-/// lexicon. Suspended conjunctions need no repetition. No curated suffix
-/// heuristics are used beyond the suspension
-/// conjunctions (a curated suffix list was tried and removed — it was
-/// English-only, its membership was unfalsifiable, and it could invent
-/// hyphens: "proto- type" -> "proto-type").
-///
-/// Table rows and fenced code blocks are left untouched.
+/// Evidence order: explicit U+00AD joins; a document-attested hyphenated
+/// spelling wins over a closed spelling; absent either witness, a layout-proven
+/// break joins on English lexical evidence only when the hyphenated spelling
+/// is unknown. There is no bundled German lexicon: unknown German breaks stay
+/// open. Tables, code and identifiers are protected. Rare unwitnessed coinages
+/// such as re-pair remain an explicitly tested limitation of lexical fallback.
 fn dehyphenate_line_breaks(text: &str) -> String {
     use once_cell::sync::Lazy;
     use std::collections::HashSet;
 
     const WORD: &str = r"\p{L}";
+    static SOFT_BREAK_RE: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(&format!(
+            "({WORD}+)\u{00ad}[ {LINE_END_HYPHEN_GAP}]*({WORD}+)"
+        ))
+        .unwrap()
+    });
 
     // "de- fendant", or a break the layout proved (`LINE_END_HYPHEN_GAP`)
     static BREAK_RE: Lazy<Regex> = Lazy::new(|| {
         Regex::new(&format!(
-            "({WORD}{{2,}})-([ {LINE_END_HYPHEN_GAP}])({WORD}{{2,}})"
+            "({WORD}{{2,}})([-\u{00ad}])([ {LINE_END_HYPHEN_GAP}])({WORD}{{2,}})"
         ))
         .unwrap()
     });
@@ -383,7 +368,7 @@ fn dehyphenate_line_breaks(text: &str) -> String {
         // A break can chain ("unconsti- tu- tional"); each pass joins one
         // junction, and every successful join removes a break, so running
         // until the line is stable is bounded by the number of breaks.
-        let mut current = line.to_string();
+        let mut current = SOFT_BREAK_RE.replace_all(line, "$1$2").into_owned();
         loop {
             let next = BREAK_EMPH_RE
                 .replace_all(&current, |caps: &regex::Captures| {
@@ -402,7 +387,7 @@ fn dehyphenate_line_breaks(text: &str) -> String {
                 .to_string();
             let next = BREAK_RE
                 .replace_all(&next, |caps: &regex::Captures| {
-                    let (a, b) = (&caps[1], &caps[3]);
+                    let (a, b) = (&caps[1], &caps[4]);
                     let m = caps.get(0).unwrap();
                     let prefix = next[..m.start()]
                         .rsplit(char::is_whitespace)
@@ -411,7 +396,7 @@ fn dehyphenate_line_breaks(text: &str) -> String {
                     if prefix.contains(['/', ':', '@', '$', '`']) || prefix.starts_with("www.") {
                         return format!("{a}- {b}");
                     }
-                    match join(a, b, &caps[2] != " ") {
+                    match join(a, b, &caps[3] != " ") {
                         Join::Plain => format!("{a}{b}"),
                         Join::Hyphen => format!("{a}-{b}"),
                         // Kept with a plain space, proven or not.
@@ -760,6 +745,101 @@ mod tests {
     /// of the same column went on in lowercase (see `convert`).
     fn proven(a: &str, b: &str) -> String {
         format!("{a}-{LINE_END_HYPHEN_GAP}{b}")
+    }
+
+    // Review counterexamples and three fresh variations per language. Every
+    // pair runs independently, so a neighbouring example cannot donate evidence.
+    const EVIDENCE_PAIRS: &[(&str, &str)] = &[
+        ("re", "pair"),
+        ("re", "fuse"),
+        ("re", "sent"),
+        ("re", "cover"),
+        ("re", "sign"),
+        ("re", "form"),
+        ("Unter", "suchung"),
+        ("Kraft", "fahrzeugversicherung"),
+        ("Wach", "stube"),
+        ("Druck", "erzeugnis"),
+        ("Stau", "becken"),
+    ];
+
+    #[test]
+    fn document_spelling_overrides_lexical_evidence() {
+        for &(a, b) in EVIDENCE_PAIRS {
+            let broken = proven(a, b);
+
+            let plain = format!("{a}{b}. {broken}");
+            assert_eq!(dehyphenate_line_breaks(&plain), format!("{a}{b}. {a}{b}"));
+            let hyphen = format!("{a}-{b}. {broken}");
+            assert_eq!(
+                dehyphenate_line_breaks(&hyphen),
+                format!("{a}-{b}. {a}-{b}")
+            );
+            // Both spellings occur: preserve the hard hyphen. Neither lexical
+            // membership nor a closed spelling licenses changing its meaning.
+            let both = format!("{a}{b}. {a}-{b}. {broken}");
+            assert_eq!(
+                dehyphenate_line_breaks(&both),
+                format!("{a}{b}. {a}-{b}. {a}-{b}")
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_soft_hyphens_join_without_a_dictionary() {
+        for &(a, b) in EVIDENCE_PAIRS {
+            let input = format!("{a}\u{00ad}{LINE_END_HYPHEN_GAP}{b}");
+            assert_eq!(
+                clean_markdown(input, &MarkdownOptions::default()).trim(),
+                format!("{a}{b}")
+            );
+        }
+    }
+
+    #[test]
+    fn accepted_limitation_unwitnessed_re_pair_joins_to_repair() {
+        // Accepted policy limitation: rare re-pair, re-fuse and re-sent
+        // coinages lose their hard hyphen without a document witness.
+        // Ordinary line-break words are much more frequent in academic PDFs.
+        for (a, b, expected) in [
+            ("re", "pair", "repair"),
+            ("re", "fuse", "refuse"),
+            ("re", "sent", "resent"),
+        ] {
+            assert_eq!(dehyphenate_line_breaks(&proven(a, b)), expected);
+        }
+    }
+
+    #[test]
+    fn listed_re_cover_re_sign_re_form_preserve_the_hard_hyphen() {
+        // Both spellings are listed. Unlike the named accepted limitations,
+        // the hyphenated entries veto lexical deletion, without a witness.
+        for b in ["cover", "sign", "form"] {
+            assert_eq!(
+                dehyphenate_line_breaks(&proven("re", b)),
+                format!("re- {b}")
+            );
+        }
+    }
+
+    #[test]
+    fn german_without_a_word_source_remains_open() {
+        // Open: no German lexical source is bundled. Document witnesses and
+        // explicit U+00AD still join these words; layout alone does not.
+        assert_eq!(
+            dehyphenate_line_breaks(&proven("Unter", "suchung")),
+            "Unter- suchung"
+        );
+    }
+
+    #[test]
+    fn explicit_soft_hyphen_wins_even_over_conflicting_witnesses() {
+        let text = format!("repair re-pair re\u{00ad}{LINE_END_HYPHEN_GAP}pair");
+        assert_eq!(dehyphenate_line_breaks(&text), "repair re-pair repair");
+        assert_eq!(
+            dehyphenate_line_breaks("Unter\u{00ad} suchung"),
+            "Untersuchung"
+        );
     }
 
     #[test]

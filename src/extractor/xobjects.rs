@@ -2,7 +2,7 @@
 
 use super::fonts::{font_style, FontStyle};
 use super::text_paint::{PaintResources, TextPaint};
-use crate::text_utils::{effective_font_size, expand_ligatures};
+use crate::text_utils::{effective_font_size, expand_ligatures_for_layout};
 use crate::tounicode::FontCMaps;
 use crate::types::{attach_run_coverage, BoldSource, ItemCoverage, ItemType, TextItem};
 use lopdf::{Document, Encoding, Object, ObjectId};
@@ -935,7 +935,7 @@ fn extract_form_xobject_text_inner(
                                 && text_paint.adds_bold(&text, rendered_size, base_font, &ctm);
                             let paint = text_paint.run_paint();
                             items.push(TextItem {
-                                text: expand_ligatures(&text),
+                                text: expand_ligatures_for_layout(&text),
                                 x: geometry.x,
                                 y: geometry.y,
                                 width: geometry.width,
@@ -1498,7 +1498,7 @@ fn extract_form_xobject_text_inner(
                                     && text_paint.adds_bold(text, rendered_size, base_font, &ctm);
                                 let paint = text_paint.run_paint();
                                 items.push(TextItem {
-                                    text: expand_ligatures(text),
+                                    text: expand_ligatures_for_layout(text),
                                     x: geometry.x,
                                     y: geometry.y,
                                     width: geometry.width,
@@ -1542,7 +1542,10 @@ fn extract_form_xobject_text_inner(
                             if !sub_items.is_empty() {
                                 pending_word_gaps = Some(PendingWordGaps::new(
                                     items.len() - 1,
-                                    expand_ligatures(&format!("{prefix}{}", candidate.spaced_text)),
+                                    expand_ligatures_for_layout(&format!(
+                                        "{prefix}{}",
+                                        candidate.spaced_text
+                                    )),
                                     &text_matrix,
                                     &ctm,
                                     horizontal_scale,

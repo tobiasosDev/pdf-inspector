@@ -3,7 +3,7 @@
 //! Walks the page's content stream, tracking the graphics state and text
 //! matrix, and emits `TextItem`s and `PdfRect`s.
 
-use crate::text_utils::{decode_text_string, effective_font_size, expand_ligatures};
+use crate::text_utils::{decode_text_string, effective_font_size, expand_ligatures_for_layout};
 use crate::tounicode::FontCMaps;
 use crate::types::{
     attach_run_coverage, BoldSource, FontWidthInfo, ItemCoverage, ItemType, PageExtraction,
@@ -1094,7 +1094,7 @@ pub(crate) fn extract_page_text_items_with_options(
                                 && text_paint.adds_bold(&text, rendered_size, base_font, &ctm);
                             let paint = text_paint.run_paint();
                             items.push(TextItem {
-                                text: expand_ligatures(&text),
+                                text: expand_ligatures_for_layout(&text),
                                 x: geometry.x,
                                 y: geometry.y,
                                 width: geometry.width,
@@ -1726,7 +1726,7 @@ pub(crate) fn extract_page_text_items_with_options(
                                     && text_paint.adds_bold(text, rendered_size, base_font, &ctm);
                                 let paint = text_paint.run_paint();
                                 items.push(TextItem {
-                                    text: expand_ligatures(text),
+                                    text: expand_ligatures_for_layout(text),
                                     x: geometry.x,
                                     y: geometry.y,
                                     width: geometry.width,
@@ -1770,7 +1770,10 @@ pub(crate) fn extract_page_text_items_with_options(
                             if !sub_items.is_empty() {
                                 pending_word_gaps = Some(PendingWordGaps::new(
                                     items.len() - 1,
-                                    expand_ligatures(&format!("{prefix}{}", candidate.spaced_text)),
+                                    expand_ligatures_for_layout(&format!(
+                                        "{prefix}{}",
+                                        candidate.spaced_text
+                                    )),
                                     &text_matrix,
                                     &ctm,
                                     horizontal_scale,
@@ -1972,7 +1975,7 @@ pub(crate) fn extract_page_text_items_with_options(
                                 && text_paint.adds_bold(&text, rendered_size, base_font, &ctm);
                             let paint = text_paint.run_paint();
                             items.push(TextItem {
-                                text: expand_ligatures(&text),
+                                text: expand_ligatures_for_layout(&text),
                                 x: geometry.x,
                                 y: geometry.y,
                                 width: geometry.width,
@@ -2321,7 +2324,7 @@ pub(crate) fn extract_page_text_items_with_options(
                                         &ctm,
                                     );
                                 items.push(TextItem {
-                                    text: expand_ligatures(&at),
+                                    text: expand_ligatures_for_layout(&at),
                                     x: geometry.x,
                                     y: geometry.y,
                                     width: geometry.width,
