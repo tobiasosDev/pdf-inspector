@@ -204,8 +204,17 @@ fn join_decision(a: &str, b: &str, proven: bool, vocabulary: &Vocabulary) -> Joi
     let key_hyphen = format!("{}-{}", a.to_lowercase(), b.to_lowercase());
     if words.contains(&key_plain) {
         Join::Plain
-    } else if hyphenated.contains(&key_hyphen) || b.chars().next().is_some_and(|c| c.is_uppercase())
+    } else if hyphenated.contains(&key_hyphen)
+        || b.chars().next().is_some_and(|c| c.is_uppercase())
+        || (proven
+            && a.chars().count() >= 2
+            && a.chars().all(|c| c.is_uppercase())
+            && b.chars().next().is_some_and(|c| c.is_lowercase())
+            && !(b.chars().count() < 4 && tokens.contains(&b.to_lowercase())))
     {
+        // An all-capital head before a lowercase continuation is an acronym
+        // compound ("ATP-abhängigen"), not a syllable to fuse. Require a
+        // proven break and keep suspended hyphens ("ATP- und ...") intact.
         Join::Hyphen
     } else if b.chars().count() >= 4
         && words.contains(&a.to_lowercase())
@@ -763,6 +772,31 @@ mod tests {
             dehyphenate_line_breaks(&text),
             "usually follow chronological order; meeting abstracts and presentations. \
              The foundational decisions, results, and discussion."
+        );
+    }
+
+    #[test]
+    fn proven_acronym_compounds_keep_their_hyphen() {
+        let text = format!(
+            "Die {} Kanäle und {} Messung.",
+            proven("ATP", "abhängigen"),
+            proven("DNA", "based")
+        );
+        assert_eq!(
+            dehyphenate_line_breaks(&text),
+            "Die ATP-abhängigen Kanäle und DNA-based Messung."
+        );
+    }
+
+    #[test]
+    fn proven_acronym_head_keeps_a_suspended_hyphen() {
+        let text = format!(
+            "Die {} ADP-abhängigen Kanäle und andere.",
+            proven("ATP", "und")
+        );
+        assert_eq!(
+            dehyphenate_line_breaks(&text),
+            "Die ATP- und ADP-abhängigen Kanäle und andere."
         );
     }
 
