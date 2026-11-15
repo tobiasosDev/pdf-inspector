@@ -156,15 +156,23 @@ pub(crate) fn spacing_after_string(
     spacing_after(last, char_spacing, word_spacing) / font_size * 1000.0
 }
 
-/// Whether `array` takes its character spacing back: some string is followed
-/// directly by a positive offset that takes the spacing after its last glyph
-/// back (see [`offset_takes_spacing_back`]). Such an array writes its word
-/// gaps as the spacing left standing, so its offsets are judged with the
-/// spacing before them (see [`spacing_after_string`]); spacing nothing
-/// takes back is tracking, and offsets are judged as they stand.
+/// Whether `array` takes its character spacing back inside a word: some
+/// string whose trailing spacing is itself a word gap by `space_threshold`
+/// is followed directly by a positive offset that takes that spacing back
+/// (see [`offset_takes_spacing_back`]), and by another string, with no
+/// space code on either side of that junction. Spacing narrower than a word
+/// gap is letter spacing (InDesign justification: `0.065 Tc [(r) 43 (.)]`),
+/// and a kern that happens to match it takes nothing back.
+/// Such an array writes its word gaps as the spacing left standing, so its
+/// offsets are judged with the spacing before them (see
+/// [`spacing_after_string`]). Spacing taken back next to a space glyph says
+/// nothing about word gaps, since the glyph carries them (InDesign tracking:
+/// `0.2 Tc [(o b) -1 (o) 2 (th) 200 ( )]`); spacing nothing takes back is
+/// tracking, and offsets are judged as they stand.
 pub(crate) fn array_takes_spacing_back(
     array: &[Object],
     font_info: Option<&FontWidthInfo>,
+    space_threshold: f32,
     font_size: f32,
     char_spacing: f32,
     word_spacing: f32,
@@ -172,14 +180,29 @@ pub(crate) fn array_takes_spacing_back(
     if font_size <= 0.0 || (char_spacing == 0.0 && word_spacing == 0.0) {
         return false;
     }
-    array.windows(2).any(|pair| {
-        get_operand_bytes(&pair[0]).is_some_and(|raw| {
-            let spacing_ts =
-                spacing_after_string(raw, font_info, font_size, char_spacing, word_spacing)
-                    / 1000.0
-                    * font_size;
-            offset_takes_spacing_back(&pair[1], spacing_ts, font_size)
-        })
+    let code_len = if font_info.is_some_and(|font_info| font_info.is_cid) {
+        2
+    } else {
+        1
+    };
+    array.windows(3).any(|junction| {
+        let (Some(before), Some(after)) = (
+            get_operand_bytes(&junction[0]),
+            get_operand_bytes(&junction[2]),
+        ) else {
+            return false;
+        };
+        if before.len() < code_len || after.len() < code_len {
+            return false;
+        }
+        if is_space_code(&before[before.len() - code_len..]) || is_space_code(&after[..code_len]) {
+            return false;
+        }
+        let spacing_ts =
+            spacing_after_string(before, font_info, font_size, char_spacing, word_spacing) / 1000.0
+                * font_size;
+        spacing_is_word_gap(spacing_ts, font_size, space_threshold)
+            && offset_takes_spacing_back(&junction[1], spacing_ts, font_size)
     })
 }
 

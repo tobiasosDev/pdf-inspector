@@ -1195,6 +1195,7 @@ pub(crate) fn extract_page_text_items_with_options(
                         let (gap_char_spacing, gap_word_spacing) = if array_takes_spacing_back(
                             array,
                             font_info,
+                            space_threshold,
                             current_font_size,
                             char_spacing,
                             word_spacing,
@@ -5334,6 +5335,32 @@ BT /F1 10 Tf 300 30 Td (7) Tj ET";
         );
         let texts: Vec<_> = items.iter().map(|i| i.text.as_str()).collect();
         assert_eq!(texts.concat(), "WORD");
+    }
+
+    /// Tracking taken back only before a space glyph is still tracking:
+    /// the space glyph carries the word gap, so the kerns between the
+    /// letters stay kerns (EU-OSHA heading set by InDesign).
+    #[test]
+    fn tracking_taken_back_before_a_space_glyph_keeps_the_words() {
+        let items = extract_simple_items(
+            b"BT /F1 1 Tf 12.5 0 0 12.5 72 700 Tm 0.2 Tc \
+              [(W) 22 (or) -4 (k) 32 (-) 4 (r) -4 (e) -3 (la) 4 (t) 7 (e) -2 (d v) -3 (i) 1 (o) -2 (l) 2 (en) 4 (c) 2 (e b) -1 (o) 2 (th) 200 ( )] TJ ET",
+        );
+        let texts: Vec<_> = items.iter().map(|i| i.text.as_str()).collect();
+        assert_eq!(texts.concat().trim_end(), "Work-related violence both");
+    }
+
+    /// Letter spacing narrower than a word gap is not taken back, even where
+    /// a kern happens to match it: a justified URL keeps its letters (EU-OSHA
+    /// reference list, 0.065 em tracking).
+    #[test]
+    fn letter_spacing_matched_by_a_kern_keeps_the_letters() {
+        let items = extract_simple_items(
+            b"BT /F1 1 Tf 10.5 0 0 10.5 72 700 Tm 0.065 Tc \
+              [(w) -28 (w) -28 (w) 36 (.) 30 (w) 9 (or) -1 (k) 14 (c) 19 (o) 10 (v) 10 (e) 6 (r) 43 (.) -4 (n) 11 (s) -5 (w) 36 (.) 5 (go) 10 (v) 49 (.)] TJ ET",
+        );
+        let texts: Vec<_> = items.iter().map(|i| i.text.as_str()).collect();
+        assert_eq!(texts.concat(), "www.workcover.nsw.gov.");
     }
 
     /// A space run wide enough to be seen as a gap (0.6 em here) is left to

@@ -1040,6 +1040,7 @@ fn extract_form_xobject_text_inner(
                         let (gap_char_spacing, gap_word_spacing) = if array_takes_spacing_back(
                             array,
                             font_info,
+                            space_threshold,
                             current_font_size,
                             char_spacing,
                             word_spacing,
