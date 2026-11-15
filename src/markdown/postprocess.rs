@@ -5,13 +5,6 @@ use regex::Regex;
 use super::{MarkdownOptions, MarkdownProfile};
 use crate::text_utils::is_page_number_line;
 
-/// Stands in for the space after a hyphen that the layout proved to end a
-/// line, with the next line of the same column going on in lowercase
-/// (`convert`). The hyphenation pass may join such a break without
-/// vocabulary evidence; every other pass sees a plain space. A Unicode
-/// noncharacter, so no PDF text can carry it.
-pub(crate) const LINE_END_HYPHEN_GAP: char = '\u{FDD0}';
-
 /// Clean up markdown output with post-processing
 pub(crate) fn clean_markdown(mut text: String, options: &MarkdownOptions) -> String {
     if options.profile == MarkdownProfile::Compact {
@@ -27,9 +20,6 @@ pub(crate) fn clean_markdown(mut text: String, options: &MarkdownOptions) -> Str
     // Fix hyphenation (before other processing)
     if options.fix_hyphenation {
         text = fix_hyphenation(&text);
-    }
-    if text.contains(LINE_END_HYPHEN_GAP) {
-        text = text.replace(LINE_END_HYPHEN_GAP, " ");
     }
 
     // Remove standalone page numbers
@@ -173,26 +163,16 @@ enum Join {
     Keep,
 }
 
-/// The document's vocabulary away from line breaks.
-struct Vocabulary {
-    /// Words of three or more letters.
-    words: std::collections::HashSet<String>,
-    /// Every standalone word, short ones included ("in", "or", "und").
-    tokens: std::collections::HashSet<String>,
-    /// Hyphenated compounds ("six-month").
-    hyphenated: std::collections::HashSet<String>,
-}
-
 /// Decide what a line-break hyphen pair becomes, given the document's
 /// vocabulary evidence. The whole dehyphenation policy lives here so it can
 /// be reasoned about (and tested) apart from the Markdown scanning around it;
 /// see [`dehyphenate_line_breaks`] for the rule rationale.
-fn join_decision(a: &str, b: &str, proven: bool, vocabulary: &Vocabulary) -> Join {
-    let Vocabulary {
-        words,
-        tokens,
-        hyphenated,
-    } = vocabulary;
+fn join_decision(
+    a: &str,
+    b: &str,
+    words: &std::collections::HashSet<String>,
+    hyphenated: &std::collections::HashSet<String>,
+) -> Join {
     // Word-length sanity: syllable fragments are short, and even long German
     // compounds stay under this. Fragments beyond it are already fused
     // reading-order noise (interleaved columns); joining would compound the
@@ -204,17 +184,8 @@ fn join_decision(a: &str, b: &str, proven: bool, vocabulary: &Vocabulary) -> Joi
     let key_hyphen = format!("{}-{}", a.to_lowercase(), b.to_lowercase());
     if words.contains(&key_plain) {
         Join::Plain
-    } else if hyphenated.contains(&key_hyphen)
-        || b.chars().next().is_some_and(|c| c.is_uppercase())
-        || (proven
-            && a.chars().count() >= 2
-            && a.chars().all(|c| c.is_uppercase())
-            && b.chars().next().is_some_and(|c| c.is_lowercase())
-            && !(b.chars().count() < 4 && tokens.contains(&b.to_lowercase())))
+    } else if hyphenated.contains(&key_hyphen) || b.chars().next().is_some_and(|c| c.is_uppercase())
     {
-        // An all-capital head before a lowercase continuation is an acronym
-        // compound ("ATP-abhängigen"), not a syllable to fuse. Require a
-        // proven break and keep suspended hyphens ("ATP- und ...") intact.
         Join::Hyphen
     } else if b.chars().count() >= 4
         && words.contains(&a.to_lowercase())
@@ -230,24 +201,6 @@ fn join_decision(a: &str, b: &str, proven: bool, vocabulary: &Vocabulary) -> Joi
         // three letters in any language — the length floor keeps this rule
         // off them without a hard-coded conjunction list.
         Join::Hyphen
-    } else if proven
-        && b.chars().next().is_some_and(|c| c.is_lowercase())
-        && !tokens.contains(&a.to_lowercase())
-        && !(b.chars().count() < 4 && tokens.contains(&b.to_lowercase()))
-    {
-        // No vocabulary evidence, but the layout proved the break: the
-        // hyphen ended a line and the next line of the same column goes on
-        // in lowercase, so this is no interleaved-column noise. A head that
-        // is no word of the document is a syllable ("chrono- logical",
-        // "re- sults"). Two shapes stay: a head the document uses as a word
-        // ("world- class" may be a compound broken at its own hyphen) and a
-        // short continuation the document uses on its own (the conjunction
-        // after a suspended hyphen, "pre- and post-test"). A compound broken
-        // at its own hyphen with no evidence either way ("eighteen- month"
-        // in a text that never writes it whole) fuses: at a proven line end
-        // a syllable break ("aver- ages", "addi- tion") is far more likely,
-        // and its continuation is often a word too.
-        Join::Plain
     } else {
         // No evidence at all: leave the break as it is. An unconditional join
         // here covered only ~1% more breaks on a vocabulary-rich document,
@@ -296,13 +249,9 @@ fn dehyphenate_line_breaks(text: &str) -> String {
 
     const WORD: &str = r"\p{L}";
 
-    // "de- fendant", or a break the layout proved (`LINE_END_HYPHEN_GAP`)
-    static BREAK_RE: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(&format!(
-            "({WORD}{{2,}})-([ {LINE_END_HYPHEN_GAP}])({WORD}{{2,}})"
-        ))
-        .unwrap()
-    });
+    // "de- fendant"
+    static BREAK_RE: Lazy<Regex> =
+        Lazy::new(|| Regex::new(&format!("({WORD}{{2,}})- ({WORD}{{2,}})")).unwrap());
     // "Bap-** **tist" — an emphasis span split together with the word. The
     // regex crate has no backreferences, so both markers are captured and
     // compared in the replacement closure.
@@ -313,7 +262,6 @@ fn dehyphenate_line_breaks(text: &str) -> String {
         .unwrap()
     });
     static PLAIN_WORD_RE: Lazy<Regex> = Lazy::new(|| Regex::new(&format!("{WORD}{{3,}}")).unwrap());
-    static TOKEN_RE: Lazy<Regex> = Lazy::new(|| Regex::new(&format!("{WORD}+")).unwrap());
     static HYPHENATED_RE: Lazy<Regex> =
         Lazy::new(|| Regex::new(&format!("({WORD}{{2,}})-({WORD}{{2,}})")).unwrap());
 
@@ -341,18 +289,9 @@ fn dehyphenate_line_breaks(text: &str) -> String {
     let scrubbed = BREAK_EMPH_RE.replace_all(&prose, " ");
     let scrubbed = BREAK_RE.replace_all(&scrubbed, " ");
     let mut words: HashSet<String> = HashSet::new();
-    let mut tokens: HashSet<String> = HashSet::new();
     let mut hyphenated: HashSet<String> = HashSet::new();
     for m in PLAIN_WORD_RE.find_iter(&scrubbed) {
         words.insert(m.as_str().to_lowercase());
-    }
-    // A token glued to a hyphen is part of a compound, not standalone.
-    for m in TOKEN_RE.find_iter(&scrubbed) {
-        let before = scrubbed[..m.start()].chars().next_back();
-        let after = scrubbed[m.end()..].chars().next();
-        if before != Some('-') && after != Some('-') {
-            tokens.insert(m.as_str().to_lowercase());
-        }
     }
     for caps in HYPHENATED_RE.captures_iter(&scrubbed) {
         hyphenated.insert(format!(
@@ -362,12 +301,7 @@ fn dehyphenate_line_breaks(text: &str) -> String {
         ));
     }
 
-    let vocabulary = Vocabulary {
-        words,
-        tokens,
-        hyphenated,
-    };
-    let join = |a: &str, b: &str, proven: bool| join_decision(a, b, proven, &vocabulary);
+    let join = |a: &str, b: &str| join_decision(a, b, &words, &hyphenated);
 
     let mut in_code_block = false;
     let mut out = String::with_capacity(text.len());
@@ -395,7 +329,7 @@ fn dehyphenate_line_breaks(text: &str) -> String {
                         return caps[0].to_string();
                     }
                     let (a, b) = (&caps[1], &caps[4]);
-                    match join(a, b, false) {
+                    match join(a, b) {
                         Join::Plain => format!("{a}{b}"),
                         Join::Hyphen => format!("{a}-{b}"),
                         Join::Keep => caps[0].to_string(),
@@ -404,12 +338,11 @@ fn dehyphenate_line_breaks(text: &str) -> String {
                 .to_string();
             let next = BREAK_RE
                 .replace_all(&next, |caps: &regex::Captures| {
-                    let (a, b) = (&caps[1], &caps[3]);
-                    match join(a, b, &caps[2] != " ") {
+                    let (a, b) = (&caps[1], &caps[2]);
+                    match join(a, b) {
                         Join::Plain => format!("{a}{b}"),
                         Join::Hyphen => format!("{a}-{b}"),
-                        // Kept with a plain space, proven or not.
-                        Join::Keep => format!("{a}- {b}"),
+                        Join::Keep => caps[0].to_string(),
                     }
                 })
                 .to_string();
@@ -747,119 +680,6 @@ mod tests {
         assert_eq!(
             dehyphenate_line_breaks(german),
             "Das Bundesausbildungsförderungsgesetz. Das Bundesausbildungsförderungsgesetz gilt."
-        );
-    }
-
-    /// A break the layout proved: the hyphen ended a line and the next line
-    /// of the same column went on in lowercase (see `convert`).
-    fn proven(a: &str, b: &str) -> String {
-        format!("{a}-{LINE_END_HYPHEN_GAP}{b}")
-    }
-
-    #[test]
-    fn proven_line_end_breaks_join_without_vocabulary_evidence() {
-        // Sukhera 2022 (JGME): a two-page article never repeats
-        // "chronological" or "presentations", so only the layout can tell
-        // the syllable break from interleaved-column noise.
-        let text = format!(
-            "usually follow {} order; meeting abstracts and {}. The {} decisions, {}, and discussion.",
-            proven("chrono", "logical"),
-            proven("presen", "tations"),
-            proven("founda", "tional"),
-            proven("re", "sults"),
-        );
-        assert_eq!(
-            dehyphenate_line_breaks(&text),
-            "usually follow chronological order; meeting abstracts and presentations. \
-             The foundational decisions, results, and discussion."
-        );
-    }
-
-    #[test]
-    fn proven_acronym_compounds_keep_their_hyphen() {
-        let text = format!(
-            "Die {} Kanäle und {} Messung.",
-            proven("ATP", "abhängigen"),
-            proven("DNA", "based")
-        );
-        assert_eq!(
-            dehyphenate_line_breaks(&text),
-            "Die ATP-abhängigen Kanäle und DNA-based Messung."
-        );
-    }
-
-    #[test]
-    fn proven_acronym_head_keeps_a_suspended_hyphen() {
-        let text = format!(
-            "Die {} ADP-abhängigen Kanäle und andere.",
-            proven("ATP", "und")
-        );
-        assert_eq!(
-            dehyphenate_line_breaks(&text),
-            "Die ATP- und ADP-abhängigen Kanäle und andere."
-        );
-    }
-
-    #[test]
-    fn proven_breaks_still_follow_vocabulary_evidence() {
-        let text = format!(
-            "A six-month term. After a {} delay, the {} complaint.",
-            proven("six", "month"),
-            proven("Third", "Party"),
-        );
-        assert_eq!(
-            dehyphenate_line_breaks(&text),
-            "A six-month term. After a six-month delay, the Third-Party complaint."
-        );
-    }
-
-    #[test]
-    fn proven_breaks_keep_suspended_hyphens_and_word_heads() {
-        // "pre- and post-test": the continuation is a short word the text
-        // uses on its own. "world- class": the head is itself a word of the
-        // document, so the break may be a compound's own hyphen. Both stay.
-        let text = format!(
-            "The {} post-test scores and a {} model of the world.",
-            proven("pre", "and"),
-            proven("world", "class"),
-        );
-        assert_eq!(
-            dehyphenate_line_breaks(&text),
-            "The pre- and post-test scores and a world- class model of the world."
-        );
-    }
-
-    #[test]
-    fn proven_breaks_join_before_a_continuation_that_is_a_word() {
-        // JAMA 2018: "aver- ages" and "addi- tion" end lines; "ages" is a
-        // word of the document too. A compound needs evidence to keep its
-        // hyphen ("eighteen-month" written whole elsewhere).
-        let text = format!(
-            "Mean {} by age; ages vary. In {}, an {} lag after the eighteen-month mark.",
-            proven("aver", "ages"),
-            proven("addi", "tion"),
-            proven("eighteen", "month"),
-        );
-        assert_eq!(
-            dehyphenate_line_breaks(&text),
-            "Mean averages by age; ages vary. In addition, an eighteen-month lag after the eighteen-month mark."
-        );
-    }
-
-    #[test]
-    fn the_line_end_marker_never_reaches_the_output() {
-        let text = format!("follow {} order", proven("chrono", "logical"));
-        let options = MarkdownOptions {
-            fix_hyphenation: false,
-            ..MarkdownOptions::default()
-        };
-        assert_eq!(
-            clean_markdown(text.clone(), &options).trim_end(),
-            "follow chrono- logical order"
-        );
-        assert_eq!(
-            clean_markdown(text, &MarkdownOptions::default()).trim_end(),
-            "follow chronological order"
         );
     }
 
